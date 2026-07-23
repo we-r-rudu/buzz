@@ -23,6 +23,10 @@
 
 ---
 
+> [!NOTE]
+> This is the Rudu-maintained fork of [`block/buzz`](https://github.com/block/buzz).
+> See [FORK.md](FORK.md) for fork ownership and the upstream sync policy.
+
 ## What is this, really?
 
 Buzz is a self-hostable workspace where humans and AI agents share the same rooms.

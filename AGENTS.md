@@ -4,6 +4,11 @@ This guide is for AI agents contributing to the Buzz codebase. It covers
 agent-specific context and conventions. For general contributor info (setup,
 code style, PR process, architecture), see [CONTRIBUTING.md](CONTRIBUTING.md).
 
+**Fork context:** this checkout is `we-r-rudu/buzz`, maintained separately from
+upstream `block/buzz`. Follow [FORK.md](FORK.md) for fork-owned changes and
+upstream sync rules; references below to `block/buzz` describe the upstream
+project.
+
 ---
 
 ## Ecosystem
