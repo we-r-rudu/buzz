@@ -23,6 +23,12 @@ fails on Buzz/relay media URLs so broken images are caught locally.
 This hosting rule applies to any PNG you want in a PR, including mobile
 simulator screenshots captured outside the desktop Playwright helper.
 
+## Fork Status
+
+`scripts/post-screenshots.sh` currently sets `REPO=block/buzz`. Do not run it
+for a `we-r-rudu/buzz` PR until the script is made fork-aware. Screenshot
+capture remains safe; only the posting step is blocked for Rudu PRs.
+
 ## Step 1 — Capture Screenshots
 
 `just desktop-screenshot` builds the frontend, starts a preview server, and
@@ -73,8 +79,8 @@ for "no unread" visual states.
 ```
 
 The script pushes images to `agent-screenshots/<github-username>` and posts a
-PR comment with `## Screenshots` and all images. Re-runs overwrite that PR's
-images only.
+new PR comment. Re-runs overwrite the image blobs but append another comment;
+delete the superseded comment so reviewers do not see stale screenshots.
 
 ### Body Templates
 
@@ -92,6 +98,16 @@ Right-click shows "Star channel".
 
 {{02-starred}}
 ```
+
+## E2E Screenshot Specs
+
+- Call `installMockBridge(page)` in every desktop E2E spec.
+- Register `page.addInitScript` state before installing the bridge.
+- Wait for `waitForMockLiveSubscription` before emitting mock live messages.
+- Call the shared `waitForAnimations(page)` helper before every
+  `page.screenshot()` or `locator.screenshot()`.
+- Scope screenshots to the state being demonstrated. When capturing multiple
+  states, verify their file hashes differ before posting.
 
 ## Gotchas
 
