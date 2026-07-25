@@ -8,7 +8,7 @@ use super::{
     is_login_shell_path_uninit, is_safe_nvm_tag, managed_agent_avatar_url, normalize_agent_args,
     parse_semver_tag, preset_catalog_entry, probe_codex_acp_major_version, record_agent_command,
     refresh_login_shell_path, try_record_agent_command, PresetHarness, BUZZ_AGENT_AVATAR_URL,
-    CLAUDE_CODE_AVATAR_URL, CODEX_AVATAR_URL, GOOSE_AVATAR_URL,
+    CLAUDE_CODE_AVATAR_URL, CODEX_AVATAR_URL, GOOSE_AVATAR_URL, OMP_AVATAR_URL,
 };
 use crate::managed_agents::AcpAvailabilityStatus;
 
@@ -94,6 +94,58 @@ fn normalizes_buzz_agent_args_to_empty() {
         normalize_agent_args("buzz-agent", vec!["acp".into()]),
         Vec::<String>::new()
     );
+}
+
+#[test]
+fn omp_args_default_to_acp_subcommand() {
+    // Like goose, `omp` needs the `acp` subcommand to serve ACP — it must be
+    // injected when empty and preserved when already present (never stripped
+    // the way zero-arg adapters strip it).
+    assert_eq!(
+        normalize_agent_args("omp", Vec::new()),
+        vec!["acp".to_string()]
+    );
+    assert_eq!(
+        normalize_agent_args("omp", vec!["acp".into()]),
+        vec!["acp".to_string()]
+    );
+    assert_eq!(
+        normalize_agent_args("oh-my-pi", Vec::new()),
+        vec!["acp".to_string()]
+    );
+}
+
+#[test]
+fn resolves_omp_avatar_and_runtime() {
+    assert_eq!(
+        managed_agent_avatar_url("omp"),
+        Some(OMP_AVATAR_URL.to_string())
+    );
+    assert_eq!(
+        managed_agent_avatar_url("/usr/local/bin/omp"),
+        Some(OMP_AVATAR_URL.to_string())
+    );
+    assert_eq!(
+        managed_agent_avatar_url("oh-my-pi"),
+        Some(OMP_AVATAR_URL.to_string())
+    );
+}
+
+#[test]
+fn omp_install_commands_are_runtime_free_shell_installers() {
+    let omp = super::known_acp_runtime_exact("omp").expect("omp runtime");
+    assert!(
+        !omp.cli_install_commands_for_os().is_empty(),
+        "omp must have install commands on every platform"
+    );
+    // The installer delivers a standalone binary — no npm adapter step, so
+    // Doctor must not flag Node.js as required.
+    assert!(omp.adapter_install_commands.is_empty());
+    assert!(!super::runtime_needs_npm(omp));
+    // omp is the CLI itself: no separate underlying CLI to probe, so a
+    // missing binary classifies as NotInstalled (never AdapterMissing).
+    let (status, _, _) = classify_runtime(None, omp.underlying_cli, false);
+    assert_eq!(status, AcpAvailabilityStatus::NotInstalled);
 }
 
 #[test]

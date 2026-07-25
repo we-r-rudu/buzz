@@ -155,6 +155,22 @@ export function deriveAgentConfigFieldModel({
       render: "deferredUntilNativeOptionsAvailable",
       value: null,
     });
+  } else if (runtime?.id === "omp") {
+    // omp exposes thinking as an ACP configOption (id "thinking", category
+    // "thought_level"), only enumerable once a session exists — same
+    // deferred stance as Claude, but with omp's own config id.
+    fields.push({
+      kind: "effort",
+      optionSource: "harnessNative",
+      currentPersistence: { kind: "unavailable" },
+      targetApplication: {
+        kind: "acpConfigOption",
+        id: "thinking",
+        category: "thought_level",
+      },
+      render: "deferredUntilNativeOptionsAvailable",
+      value: null,
+    });
   } else {
     omissions.push({
       kind: "effort",

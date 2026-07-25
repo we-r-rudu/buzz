@@ -58,7 +58,12 @@ pub(crate) fn read_config_surface(
             .or_else(|| find_config_option_value(c, "model"))
     });
     let acp_mode = session_cache.and_then(|c| find_config_option_value(c, "mode"));
-    let acp_effort = session_cache.and_then(|c| find_config_option_value(c, "effort"));
+    // Effort category differs by harness: claude's adapter uses "effort",
+    // omp exposes the ACP-standard "thought_level".
+    let acp_effort = session_cache.and_then(|c| {
+        find_config_option_value(c, "effort")
+            .or_else(|| find_config_option_value(c, "thought_level"))
+    });
     let record_effort = thinking_env_var
         .and_then(|k| record.env_vars.get(k))
         .cloned();
@@ -447,9 +452,15 @@ fn build_thinking_field(
     ];
     let (value, origin, overridden_value, overridden_origin) = resolve_with_override(tiers)?;
 
-    let write_via = if !is_pre_spawn && has_config_option(session_cache, "effort") {
-        ConfigWriteMechanism::AcpSetConfigOption {
-            config_id: "effort".to_string(),
+    let write_via = if !is_pre_spawn {
+        if let Some(config_id) = find_thinking_config_id(session_cache) {
+            ConfigWriteMechanism::AcpSetConfigOption { config_id }
+        } else if let Some(env_key) = thinking_env_var {
+            ConfigWriteMechanism::RespawnWithEnvVar {
+                env_key: env_key.to_string(),
+            }
+        } else {
+            ConfigWriteMechanism::ReadOnly
         }
     } else if let Some(env_key) = thinking_env_var {
         ConfigWriteMechanism::RespawnWithEnvVar {
@@ -585,6 +596,18 @@ fn find_model_config_id(cache: Option<&SessionConfigCache>) -> Option<String> {
         c.config_options
             .iter()
             .find(|o| o.category.as_deref() == Some("model"))
+            .map(|o| o.config_id.clone())
+    })
+}
+
+/// Effort/thinking config option id, matched by category so each harness's
+/// own id is used on writes: claude's adapter exposes category "effort"
+/// (id "effort"), omp exposes ACP-standard "thought_level" (id "thinking").
+fn find_thinking_config_id(cache: Option<&SessionConfigCache>) -> Option<String> {
+    cache.and_then(|c| {
+        c.config_options
+            .iter()
+            .find(|o| matches!(o.category.as_deref(), Some("effort") | Some("thought_level")))
             .map(|o| o.config_id.clone())
     })
 }

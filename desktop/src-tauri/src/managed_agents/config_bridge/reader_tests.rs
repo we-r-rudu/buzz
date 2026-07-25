@@ -251,6 +251,42 @@ fn post_spawn_with_model_config_option_uses_acp() {
 }
 
 #[test]
+fn post_spawn_thought_level_config_option_surfaces_effort_with_native_write() {
+    // omp exposes thinking as category "thought_level" (id "thinking"), not
+    // claude's "effort". The surface must read the value and route writes to
+    // the session's own config id.
+    let record = test_record();
+    let runtime = test_runtime();
+    let cache = SessionConfigCache {
+        config_options: vec![AcpConfigOptionEntry {
+            config_id: "thinking".to_string(),
+            category: Some("thought_level".to_string()),
+            display_name: Some("Thinking".to_string()),
+            current_value: Some("high".to_string()),
+            options: vec![],
+        }],
+        available_modes: vec![],
+        available_models: vec![],
+        current_model: None,
+        model_overridden: false,
+        goose_native_config: None,
+        captured_at: "".to_string(),
+    };
+
+    let surface = read_config_surface(&record, Some(runtime), Some(&cache), None);
+    let effort = surface
+        .normalized
+        .thinking_effort
+        .expect("thought_level option must surface as thinking_effort");
+    assert_eq!(effort.value.as_deref(), Some("high"));
+    assert_eq!(effort.origin, ConfigOrigin::AcpConfigOption);
+    assert!(matches!(
+        effort.write_via,
+        ConfigWriteMechanism::AcpSetConfigOption { ref config_id } if config_id == "thinking"
+    ));
+}
+
+#[test]
 fn acp_model_overrides_file_model_with_override_tracking() {
     let record = test_record();
     let runtime = test_runtime();

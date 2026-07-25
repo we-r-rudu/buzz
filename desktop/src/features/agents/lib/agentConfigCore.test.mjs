@@ -126,6 +126,36 @@ test("Codex omits separate effort because model IDs own it", () => {
   ]);
 });
 
+test("omp models effort as a deferred native ACP option with its own config id", () => {
+  const model = deriveAgentConfigFieldModel({
+    config,
+    runtime: runtime("omp"),
+    scope: "global",
+  });
+
+  assert.deepEqual(
+    model.fields.map((item) => item.kind),
+    ["model", "effort"],
+  );
+  // Model is ACP-native: no env var application path.
+  assert.deepEqual(field(model, "model").targetApplication, {
+    kind: "acpNative",
+  });
+  assert.equal(
+    field(model, "effort").render,
+    "deferredUntilNativeOptionsAvailable",
+  );
+  // omp's thinking configOption is id "thinking" (not claude's "effort").
+  assert.deepEqual(field(model, "effort").targetApplication, {
+    kind: "acpConfigOption",
+    id: "thinking",
+    category: "thought_level",
+  });
+  assert.deepEqual(field(model, "effort").currentPersistence, {
+    kind: "unavailable",
+  });
+});
+
 test("catalog mismatch cleanup is named and restricted to onboarding", () => {
   const selectedRuntime = runtime("buzz-agent", {
     modelEnvVar: "BUZZ_AGENT_MODEL",

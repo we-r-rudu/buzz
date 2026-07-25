@@ -19,6 +19,8 @@ const CLAUDE_CODE_AVATAR_URL: &str = "https://anthropic.gallerycdn.vsassets.io/e
 const CODEX_AVATAR_URL: &str = "https://openai.gallerycdn.vsassets.io/extensions/openai/chatgpt/26.5313.41514/1773706730621/Microsoft.VisualStudio.Services.Icons.Default";
 const BUZZ_AGENT_AVATAR_URL: &str =
     "https://raw.githubusercontent.com/block/buzz/refs/heads/main/crates/buzz-agent/buzz-agent.png";
+const OMP_AVATAR_URL: &str =
+    "https://raw.githubusercontent.com/can1357/oh-my-pi/main/assets/icon.svg";
 
 fn common_binary_paths() -> &'static [PathBuf] {
     static PATHS: OnceLock<Vec<PathBuf>> = OnceLock::new();
@@ -39,6 +41,7 @@ fn common_binary_paths() -> &'static [PathBuf] {
             paths.extend([
                 home.join(".local/share/mise/shims"),
                 home.join(".local/bin"),
+                home.join(".bun/bin"),
                 home.join(".volta/bin"),
                 home.join(".asdf/shims"),
             ]);
@@ -198,6 +201,44 @@ const KNOWN_ACP_RUNTIMES: &[KnownAcpRuntime] = &[
         max_tokens_env_var: Some("BUZZ_AGENT_MAX_OUTPUT_TOKENS"),
         context_limit_env_var: Some("BUZZ_AGENT_MAX_CONTEXT_TOKENS"),
         required_normalized_fields: &["model", "provider"],
+        login_hint: None,
+        auth_probe_args: None,
+    },
+    KnownAcpRuntime {
+        id: "omp",
+        label: "Oh My Pi",
+        commands: &["omp"],
+        aliases: &["oh-my-pi"],
+        avatar_url: OMP_AVATAR_URL,
+        mcp_command: None,
+        mcp_hooks: false,
+        // `omp` is the CLI itself; the ACP server is the built-in `omp acp`
+        // subcommand, so there is no separate underlying CLI or npm adapter.
+        underlying_cli: None,
+        cli_install_commands: &["curl -fsSL https://omp.sh/install | sh"],
+        cli_install_commands_windows: &["powershell.exe -NoProfile -ExecutionPolicy Bypass -Command \"irm https://omp.sh/install.ps1 | iex\""],
+        adapter_install_commands: &[],
+        install_instructions_url: "https://github.com/can1357/oh-my-pi",
+        cli_install_hint: "Install the omp CLI via the official install script.",
+        adapter_install_hint: "",
+        skill_dir: Some(".omp/skills"),
+        supports_acp_model_switching: false,
+        // Model/provider/effort are ACP-native: omp exposes them as
+        // session/new configOptions (categories model/mode/thought_level),
+        // not as environment variables.
+        model_env_var: None,
+        provider_env_var: None,
+        provider_locked: false,
+        default_env: &[],
+        config_file_path: Some("~/.omp/agent/config.yml"),
+        config_file_format: Some("yaml"),
+        supports_acp_native_config: false,
+        thinking_env_var: None,
+        max_tokens_env_var: None,
+        context_limit_env_var: None,
+        required_normalized_fields: &[],
+        // Provider auth is per-model env keys or the omp auth broker; there is
+        // no single login-status probe.
         login_hint: None,
         auth_probe_args: None,
     },
@@ -462,7 +503,7 @@ pub fn try_record_agent_command(
 
 fn default_agent_args(command: &str) -> Option<Vec<String>> {
     match normalize_command_identity(command).as_str() {
-        "goose" => Some(vec!["acp".to_string()]),
+        "goose" | "omp" | "oh-my-pi" => Some(vec!["acp".to_string()]),
         "codex" | "codex-acp" | "claude-agent-acp" | "claude-code-acp" | "claude-code"
         | "claudecode" | "buzz-agent" => Some(Vec::new()),
         _ => None,

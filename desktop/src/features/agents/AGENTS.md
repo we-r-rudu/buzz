@@ -39,8 +39,10 @@ with a TypeScript lookup table or an id comparison in a component.
    migration work.
 3. **Field absence has a named reason, not a boolean.** Codex effort is
    `ownedByModelId`; Claude effort is `deferredUntilNativeOptionsAvailable`.
-   New absences get new named reasons in `AgentConfigOmission` /
-   `render` — never a `showX` prop.
+   omp effort is also `deferredUntilNativeOptionsAvailable`, but targets its
+   own ACP configOption (id `thinking`, category `thought_level`) — not
+   Claude's `effort` id. New absences get new named reasons in
+   `AgentConfigOmission` / `render` — never a `showX` prop.
 4. **The clearing policy is the named types.** `onContextChange:
    "resetDependentValues"` (user changed harness/provider → dependent values
    reset everywhere) vs `onCatalogMismatch: "explainOnly" | "onboardingCleanup"`
