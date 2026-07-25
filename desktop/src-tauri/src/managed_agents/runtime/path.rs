@@ -81,10 +81,12 @@ pub(crate) fn compose_path_entries(
 ///
 /// Concatenates, in priority order:
 ///   1. `<home>/.local/bin` — bundled CLI symlink
-///   2. Buzz-managed npm prefix bin dir — app-private ACP adapter shims
-///   3. Buzz-managed Node.js bin dir — app-private Node/npm runtime
-///   4. `nvm_bin` — nvm's default Node.js bin dir (if the user uses nvm)
-///   5. exe parent dir — DMG sidecars under `Contents/MacOS/`
+///   2. `<home>/.bun/bin` — bun global shims (omp's recommended install);
+///      also lets `#!/usr/bin/env bun` interpreters resolve at spawn
+///   3. Buzz-managed npm prefix bin dir — app-private ACP adapter shims
+///   4. Buzz-managed Node.js bin dir — app-private Node/npm runtime
+///   5. `nvm_bin` — nvm's default Node.js bin dir (if the user uses nvm)
+///   6. exe parent dir — DMG sidecars under `Contents/MacOS/`
 ///   6. user's login-shell `PATH` — runtimes like node/python from other managers
 ///   7. the current process `PATH` — appended on every platform when no
 ///      login-shell PATH exists, because callers use `Command::env("PATH", …)`
@@ -115,6 +117,7 @@ pub(in crate::managed_agents) fn build_augmented_path(
     let mut managed: Vec<PathBuf> = Vec::new();
     if let Some(home) = home {
         managed.push(home.join(".local").join("bin"));
+        managed.push(home.join(".bun").join("bin"));
     }
     // Only add managed runtime dirs when a home or executable context exists.
     // This keeps tests/utility callers that intentionally pass no local context
