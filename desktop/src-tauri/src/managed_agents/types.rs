@@ -775,7 +775,14 @@ pub struct UpdateTeamRequest {
 pub const DEFAULT_ACP_COMMAND: &str = "buzz-acp";
 /// ~5 min (320s) — matches the CLI harness default (BUZZ_ACP_IDLE_TIMEOUT).
 pub const DEFAULT_AGENT_TURN_TIMEOUT_SECONDS: u64 = 320;
-pub const DEFAULT_AGENT_PARALLELISM: u32 = 10;
+/// Pool slots per spawned agent. Each slot is a FULL child process
+/// (buzz-acp spawns one ACP subprocess per slot, eagerly), so on desktop
+/// every unit costs a whole harness runtime (~300-500 MB for bun/node-based
+/// harnesses). Keep this at the buzz-acp native default of 1 — a desktop
+/// running N auto-start agents otherwise multiplies into N x 24 subprocesses
+/// and exhausts the machine. Raise per-agent only where concurrency is
+/// proven necessary.
+pub const DEFAULT_AGENT_PARALLELISM: u32 = 1;
 
 fn default_agent_parallelism() -> u32 {
     DEFAULT_AGENT_PARALLELISM

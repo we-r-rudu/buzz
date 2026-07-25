@@ -572,9 +572,25 @@ fn name_matches_known_binary_rejects_node() {
 }
 
 #[test]
+fn name_matches_known_binary_accepts_omp() {
+    // `omp` (standalone oh-my-pi binary) IS a known agent binary — claims
+    // still require the BUZZ_MANAGED_AGENT env marker, so a user's own
+    // terminal `omp` session is never swept.
+    assert!(super::name_matches_known_binary("omp"));
+}
+
+#[test]
 fn name_matches_interpreter_accepts_node() {
     // `node` IS a known script interpreter and must be recognized.
     assert!(super::name_matches_interpreter("node"));
+}
+
+#[test]
+fn name_matches_interpreter_accepts_bun() {
+    // `bun` IS a known script interpreter (omp's recommended install is a
+    // bun shim) and must be recognized — claims still require the
+    // BUZZ_MANAGED_AGENT env marker, so unrelated bun processes are safe.
+    assert!(super::name_matches_interpreter("bun"));
 }
 
 #[test]
@@ -582,7 +598,6 @@ fn name_matches_interpreter_rejects_unknown() {
     // Interpreters not in KNOWN_SCRIPT_INTERPRETERS must not match.
     assert!(!super::name_matches_interpreter("python3"));
     assert!(!super::name_matches_interpreter("deno"));
-    assert!(!super::name_matches_interpreter("bun"));
 }
 
 #[test]
