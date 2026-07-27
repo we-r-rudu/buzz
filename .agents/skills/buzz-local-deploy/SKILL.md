@@ -27,6 +27,7 @@ Build a personal, isolated Buzz desktop app from a branch of this fork and insta
 2. **Edit `desktop/src-tauri/tauri.conf.json`:**
    - `"productName": "Buzz <Slug>"`
    - `"identifier": "xyz.block.buzz.app.dev.<slug>"` — the `.dev.` infix is required, not cosmetic. It routes nest → `~/.buzz-dev` and CLI → `buzz-dev`. A plain `xyz.block.buzz.app.<slug>` identifier lands the app in the company install's `~/.buzz` nest and `buzz` CLI symlink.
+   - **Edit `desktop/src-tauri/Info.plist` too** — `CFBundleName` and `CFBundleDisplayName` are hardcoded there and override `productName` for the menu bar, Dock, and Spotlight. Skipping this leaves the app named correctly on disk but showing "Buzz" everywhere in the UI.
 3. **Edit `desktop/src-tauri/src/app_state_keyring.rs`** — release arm of `keyring_service()`: `"buzz-desktop"` → `"buzz-desktop-<slug>"`. This is the only collision that corrupts state: without it the app adopts the company identity and can clobber its keychain on sign-out/import. Identifier changes do NOT fix this — the service is compile-time hardcoded per build profile.
 4. **Optional — real agent sidecars** (skip = agent features dead in the app):
    ```bash
