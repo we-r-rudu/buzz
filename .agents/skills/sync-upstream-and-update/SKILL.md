@@ -75,8 +75,8 @@ bash .agents/skills/sync-upstream-and-update/scripts/check-vps-update.sh
 - Exit 0 → up to date, done.
 - Exit 1 → stale (or history rewritten since the build): run
   `bash .agents/skills/sync-upstream-and-update/scripts/redeploy-vps.sh`
-  (~3 min; archives the branch, rebuilds on the VPS, restarts all units,
-  restamps).
+  (~3 min; archives the branch, rebuilds on the VPS, waits for the fleet to
+  go idle — max 2 min — before restarting all units, restamps).
 
 Completion (both required):
 
@@ -92,7 +92,7 @@ ssh dn 'journalctl -u "buzz-agent@*" --since "-3min" --no-pager | grep -c "prese
 | `sync-preflight.sh` | drift count, upstream commit list, conflict forecast from three-dot diffs | no (fetch only) |
 | `validate-fork.sh` | full FORK.md validation table green (Rust suite, frontend tests, typecheck) | no |
 | `check-vps-update.sh` | VPS build stamp vs branch, filtered to the buzz-acp closure + `Cargo.lock` + `rust-toolchain.toml`; detects rebased-away stamps | no |
-| `redeploy-vps.sh` | rebuilds `buzz-acp` from the branch tip on the VPS, restarts `buzz-agent@*`, restamps | VPS only |
+| `redeploy-vps.sh` | rebuilds `buzz-acp` from the branch tip on the VPS, waits for fleet idle (≤2 min) before restarting `buzz-agent@*`, restamps | VPS only |
 
 ## Maintenance
 
