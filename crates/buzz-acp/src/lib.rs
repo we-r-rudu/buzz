@@ -4,6 +4,7 @@ mod acp;
 mod config;
 mod engram_fetch;
 mod filter;
+mod live_gate;
 mod observer;
 mod pool;
 mod pool_lifecycle;
@@ -1563,6 +1564,20 @@ async fn tokio_main() -> Result<()> {
         relay_url: config.relay_url.clone(),
     });
 
+    // Live author gate: when --env-file / BUZZ_ACP_ENV_FILE points at the
+    // deployment env file, gate edits (BUZZ_ACP_RESPOND_TO[_ALLOWLIST]) apply
+    // to the next inbound event — allowlist changes need no restart and kill
+    // no in-flight turns. None = startup-only gate (default).
+    let live_gate = config.env_file.as_ref().map(|path| {
+        live_gate::LiveGate::new(
+            path.clone(),
+            live_gate::GateValues {
+                respond_to: config.respond_to.clone(),
+                allowlist: config.respond_to_allowlist.clone(),
+            },
+        )
+    });
+
     if !config.memory_enabled {
         tracing::info!(
             target: "engram::core",
@@ -2151,9 +2166,19 @@ async fn tokio_main() -> Result<()> {
                                 // exercised by non-owner authors inside DMs.
                                 let is_dm =
                                     is_dm_channel(buzz_event.channel_id, &ctx.channel_info).await;
+                                // Live gate resolution: re-reads the env file
+                                // when it changed; falls back to startup values
+                                // when --env-file is unset or the file is bad.
+                                let live_values = live_gate
+                                    .as_ref()
+                                    .map(|gate| gate.current(&config.allowed_respond_to));
+                                let (gate_mode, gate_allowlist) = live_values
+                                    .as_ref()
+                                    .map(|v| (&v.respond_to, &v.allowlist))
+                                    .unwrap_or((&config.respond_to, &config.respond_to_allowlist));
                                 let allowed = author_allowed(
-                                    &config.respond_to,
-                                    &config.respond_to_allowlist,
+                                    gate_mode,
+                                    gate_allowlist,
                                     &author,
                                     is_dm,
                                     &owner_cache,
@@ -2164,7 +2189,7 @@ async fn tokio_main() -> Result<()> {
                                     tracing::debug!(
                                         channel_id = %buzz_event.channel_id,
                                         author = %buzz_event.event.pubkey.to_hex(),
-                                        mode = %config.respond_to,
+                                        mode = %gate_mode,
                                         is_dm,
                                         "inbound author gate — dropping event"
                                     );
@@ -4991,6 +5016,7 @@ mod build_mcp_servers_tests {
             respond_to: config::RespondTo::Anyone,
             respond_to_allowlist: std::collections::HashSet::new(),
             allowed_respond_to: vec![],
+            env_file: None,
             persona_env_vars: vec![],
             has_generated_codex_config: false,
             relay_observer: false,
@@ -5212,6 +5238,7 @@ mod error_outcome_emission_tests {
             respond_to: config::RespondTo::Anyone,
             respond_to_allowlist: HashSet::new(),
             allowed_respond_to: vec![],
+            env_file: None,
             persona_env_vars: vec![],
             has_generated_codex_config: false,
             relay_observer: false,

@@ -466,6 +466,14 @@ pub struct CliArgs {
     #[arg(long, env = "BUZZ_ACP_ALLOWED_RESPOND_TO", value_delimiter = ',')]
     pub allowed_respond_to: Option<Vec<String>>,
 
+    /// Path to the env file this process was launched with (e.g.
+    /// /etc/buzz-agents/<name>.env). When set, the inbound author gate is
+    /// re-read from this file whenever it changes — gate edits apply without
+    /// a restart. Only BUZZ_ACP_RESPOND_TO / BUZZ_ACP_RESPOND_TO_ALLOWLIST
+    /// are re-parsed; every other setting remains startup-only.
+    #[arg(long, env = "BUZZ_ACP_ENV_FILE")]
+    pub env_file: Option<PathBuf>,
+
     /// Team-owned instructions layered after `[System]` and before agent memory.
     #[arg(long, env = "BUZZ_ACP_TEAM_INSTRUCTIONS")]
     pub team_instructions: Option<String>,
@@ -539,6 +547,9 @@ pub struct Config {
     pub respond_to_allowlist: HashSet<String>,
     /// Allowed `respond_to` modes. Empty = all modes allowed.
     pub allowed_respond_to: Vec<String>,
+    /// Deployment env file to watch for live author-gate changes.
+    /// `None` = gate is startup-only (default).
+    pub env_file: Option<PathBuf>,
     /// Per-persona env vars to inject at agent spawn time (e.g., GOOSE_PROVIDER, GOOSE_MODEL, BUZZ_AGENT_MODEL).
     /// Populated from persona pack resolution. Empty when no pack is configured.
     pub persona_env_vars: Vec<(String, String)>,
@@ -626,7 +637,7 @@ pub(crate) fn compose_session_title(agent: &str, channel_name: Option<&str>) -> 
 }
 
 /// Validate and deduplicate allowlist entries: each must be exactly 64 hex chars.
-fn validate_allowlist(entries: &[String]) -> Result<HashSet<String>, ConfigError> {
+pub(crate) fn validate_allowlist(entries: &[String]) -> Result<HashSet<String>, ConfigError> {
     let mut validated = HashSet::new();
     for entry in entries {
         let trimmed = entry.trim().to_ascii_lowercase();
@@ -1071,6 +1082,7 @@ impl Config {
             respond_to: args.respond_to,
             respond_to_allowlist,
             allowed_respond_to,
+            env_file: args.env_file,
             persona_env_vars,
             has_generated_codex_config,
             relay_observer: args.relay_observer,
@@ -1441,6 +1453,7 @@ mod tests {
             respond_to: RespondTo::Anyone,
             respond_to_allowlist: HashSet::new(),
             allowed_respond_to: Vec::new(),
+            env_file: None,
             persona_env_vars: vec![],
             has_generated_codex_config: false,
             relay_observer: false,
