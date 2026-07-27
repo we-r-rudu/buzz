@@ -4,14 +4,15 @@ import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
  * /vps:allowlist — roll out a respond-to allowlist to the VPS buzz-agent fleet.
  *
  * Pure deterministic flow (no LLM turn): stepper TUI collects a CSV of user
- * pubkeys, picks target agents, then SSHes each agent's env file update +
- * service restart + verification, and prints a summary message.
+ * pubkeys, picks target agents, then SSHes each agent's env file update and
+ * prints a summary. No restart: buzz-acp's live gate (BUZZ_ACP_ENV_FILE)
+ * re-reads the env file on the next inbound event.
  *
  * Remote layout (see .agents/skills/sync-upstream-and-update):
  *   env:      /etc/buzz-agents/<name>.env   (contains BUZZ_PRIVATE_KEY — never printed)
  *   service:  buzz-agent@<name>
- *   gate:     buzz-acp reads BUZZ_ACP_RESPOND_TO / BUZZ_ACP_RESPOND_TO_ALLOWLIST
- *             at startup only — a restart is required, and DMs stay owner-only
+ *   gate:     buzz-acp re-reads BUZZ_ACP_RESPOND_TO / BUZZ_ACP_RESPOND_TO_ALLOWLIST
+ *             from the env file on mtime change; DMs stay owner-only
  *             by design regardless of mode.
  */
 
@@ -24,7 +25,7 @@ const STEP_LABELS = [
   "Collect pubkeys",
   "Pick agents",
   "Confirm rollout",
-  "Apply + restart on VPS",
+  "Apply on VPS (hot-reload)",
   "Summary",
 ] as const;
 
@@ -61,15 +62,15 @@ function remoteApplyScript(agent: string, csv: string, ts: string): string {
     `before=$(grep '^BUZZ_PRIVATE_KEY=' "$f" | sha256sum | cut -d' ' -f1)`,
     `sed -i -e '/^BUZZ_ACP_RESPOND_TO=/d' -e '/^BUZZ_ACP_RESPOND_TO_ALLOWLIST=/d' "$f"`,
     `[ -n "$(tail -c1 "$f")" ] && printf '\\n' >> "$f"`,
-    `printf 'BUZZ_ACP_RESPOND_TO=allowlist\\nBUZZ_ACP_RESPOND_TO_ALLOWLIST=%s\\n' '${csv}' >> "$f"`,
-    `systemctl restart 'buzz-agent@${agent}'`,
-    "sleep 3",
-    `active=$(systemctl is-active 'buzz-agent@${agent}' || true)`,
+    `printf 'BUZZ_ACP_RESPOND_TO=allowlist\nBUZZ_ACP_RESPOND_TO_ALLOWLIST=%s\n' '${csv}' >> "$f"`,
+    // No restart: buzz-acp's live gate (BUZZ_ACP_ENV_FILE) re-reads the env
+    // file on the next inbound event. Verify the lines landed and the
+    // identity key is intact — the harness applies the change itself.
     `after=$(grep '^BUZZ_PRIVATE_KEY=' "$f" | sha256sum | cut -d' ' -f1)`,
     `mode=$(grep -c '^BUZZ_ACP_RESPOND_TO=allowlist$' "$f" || true)`,
-    `entries=$(grep '^BUZZ_ACP_RESPOND_TO_ALLOWLIST=' "$f" | cut -d= -f2 | tr ',' '\\n' | grep -c . || true)`,
+    `entries=$(grep '^BUZZ_ACP_RESPOND_TO_ALLOWLIST=' "$f" | cut -d= -f2 | tr ',' '\n' | grep -c . || true)`,
     `[ "$before" = "$after" ] && key=ok || key=FAILED`,
-    `echo "RESULT active=$active mode=$mode entries=$entries key=$key backup=$f.bak-${ts}"`,
+    `echo "RESULT mode=$mode entries=$entries key=$key backup=$f.bak-${ts}"`,
   ].join("\n");
 }
 
@@ -191,23 +192,17 @@ export default function vpsAllowlist(pi: ExtensionAPI): void {
             results.push({ agent, ok: false, detail });
             continue;
           }
-          const m = /RESULT active=(\S+) mode=(\S+) entries=(\S+) key=(\S+)/.exec(
-            res.stdout,
-          );
+          const m = /RESULT mode=(\S+) entries=(\S+) key=(\S+)/.exec(res.stdout);
           if (!m) {
             results.push({ agent, ok: false, detail: "no RESULT marker" });
             continue;
           }
-          const [, active, mode, entries, key] = m;
-          const ok =
-            active === "active" &&
-            mode === "1" &&
-            key === "ok" &&
-            Number(entries) === pubkeys.length;
+          const [, mode, entries, key] = m;
+          const ok = mode === "1" && key === "ok" && Number(entries) === pubkeys.length;
           results.push({
             agent,
             ok,
-            detail: `active=${active} entries=${entries}/${pubkeys.length} key=${key}`,
+            detail: `entries=${entries}/${pubkeys.length} key=${key}`,
           });
         }
 
@@ -226,7 +221,7 @@ export default function vpsAllowlist(pi: ExtensionAPI): void {
               ]
             : []),
           `- Backups on-host: \`${ENV_DIR}/<name>.env.bak-${ts}\``,
-          `- Identity keys verified intact on updated agents; env contents never left the VPS`,
+          `- Applied live (hot-reload — no restart); identity keys verified intact`,
         ].join("\n");
         pi.sendMessage({
           customType: "vps-allowlist-summary",
