@@ -82,7 +82,7 @@ Completion (both required):
 
 ```bash
 bash .agents/skills/sync-upstream-and-update/scripts/check-vps-update.sh   # exit 0
-ssh dn 'journalctl -u "buzz-agent@*" --since "-3min" --no-pager | grep -c "presence set to online"'   # == fleet size (10)
+ssh dn 'journalctl -u "buzz-agent@*" --since "-3min" --no-pager | grep -c "presence set to online"'   # == fleet size (11)
 ```
 
 ## Scripts reference
