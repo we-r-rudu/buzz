@@ -1,5 +1,5 @@
 #!/bin/bash
-# Build the personal app bundle. Long (~5 min) — invoke async.
+# Build the personal Ruduzz app bundle. Long (~5 min) — invoke async.
 # NEVER `just desktop-release-build`: it re-stubs sidecars with empty files.
 set -euo pipefail
 cd "$(git rev-parse --show-toplevel)"

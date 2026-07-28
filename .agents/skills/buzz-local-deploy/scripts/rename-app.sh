@@ -1,9 +1,9 @@
 #!/bin/bash
-# Rename the personal build (or set its identity for a fresh slug).
-# Usage: rename-app.sh <product-name> [identifier]
+# Restore the personal build's Ruduzz display name (or set a fresh slug identity).
+# Usage: rename-app.sh [identifier]
 #
 # Edits exactly the display-name surfaces and NOTHING else:
-#   - desktop/src-tauri/tauri.conf.json  productName (+ identifier when given)
+#   - desktop/src-tauri/tauri.conf.json  productName=Ruduzz (+ identifier when given)
 #   - desktop/src-tauri/Info.plist       CFBundleName, CFBundleDisplayName,
 #                                        and the 3 TCC permission descriptions
 # Deliberately untouched: identifier (unless passed) and
@@ -11,32 +11,45 @@
 # Idempotent. Commit the result as a deploy-only hunk (FORK.md).
 set -euo pipefail
 cd "$(git rev-parse --show-toplevel)"
-NAME="${1:?usage: rename-app.sh <product-name> [identifier]}"
+[[ $# -le 1 ]] || { echo "usage: rename-app.sh [identifier]"; exit 2; }
+NAME=Ruduzz
 CONF=desktop/src-tauri/tauri.conf.json
 PLIST=desktop/src-tauri/Info.plist
 PB=/usr/libexec/PlistBuddy
+changed=0
 
-tmp=$(mktemp)
-if [[ $# -ge 2 ]]; then
-  jq --arg n "$NAME" --arg id "$2" '.productName=$n | .identifier=$id' "$CONF" > "$tmp"
-else
-  jq --arg n "$NAME" '.productName=$n' "$CONF" > "$tmp"
+if [[ "$(jq -r .productName "$CONF")" != "$NAME" ]] ||
+  [[ $# -eq 1 && "$(jq -r .identifier "$CONF")" != "$1" ]]; then
+  tmp=$(mktemp)
+  if [[ $# -eq 1 ]]; then
+    jq --arg n "$NAME" --arg id "$1" '.productName=$n | .identifier=$id' "$CONF" > "$tmp"
+  else
+    jq --arg n "$NAME" '.productName=$n' "$CONF" > "$tmp"
+  fi
+  mv "$tmp" "$CONF"
+  changed=1
 fi
-mv "$tmp" "$CONF"
 
-$PB -c "Set :CFBundleName $NAME" "$PLIST"
-$PB -c "Set :CFBundleDisplayName $NAME" "$PLIST"
+for key in CFBundleName CFBundleDisplayName; do
+  if [[ "$($PB -c "Print :$key" "$PLIST")" != "$NAME" ]]; then
+    $PB -c "Set :$key $NAME" "$PLIST"
+    changed=1
+  fi
+done
 for key in NSMicrophoneUsageDescription NSCameraUsageDescription NSLocalNetworkUsageDescription; do
   cur=$($PB -c "Print :$key" "$PLIST")
   # Permission sentences lead with the app name — swap the first word.
   new=$(sed "s/^[^ ]* /$NAME /" <<<"$cur")
-  $PB -c "Set :$key $new" "$PLIST"
+  if [[ "$cur" != "$new" ]]; then
+    $PB -c "Set :$key $new" "$PLIST"
+    changed=1
+  fi
 done
 
-if git diff --quiet -- "$CONF" "$PLIST"; then
-  echo "no changes — already named '$NAME'."
+if [[ $changed -eq 0 ]]; then
+  echo "NO_CHANGE — already named '$NAME'."
 else
   git diff --stat -- "$CONF" "$PLIST"
-  echo "renamed to '$NAME'. Identifier and keychain service untouched."
+  echo "RENAMED — app named '$NAME'. Identifier and keychain service untouched."
   echo "Commit as a deploy-only hunk (never lands on main/PRs — FORK.md)."
 fi

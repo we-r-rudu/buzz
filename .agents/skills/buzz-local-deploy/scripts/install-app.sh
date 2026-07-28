@@ -1,8 +1,8 @@
 #!/bin/bash
-# Install the freshly built bundle, replacing any previous install of THIS
-# identity — including old-named ones (a rename installs alongside, not over).
-# Only apps whose bundle identifier matches ours are removed; the stock
-# company Buzz (different identifier) is never touched.
+# Install the freshly built Ruduzz bundle, replacing any previous install of
+# THIS identity — including old-named ones (a rename installs alongside, not
+# over). Only apps whose bundle identifier matches ours are removed; the
+# company-installed Buzz (different identifier) is never touched.
 set -euo pipefail
 cd "$(git rev-parse --show-toplevel)"
 CONF=desktop/src-tauri/tauri.conf.json

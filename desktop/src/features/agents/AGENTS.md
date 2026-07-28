@@ -129,10 +129,12 @@ with a TypeScript lookup table or an id comparison in a component.
    when unchanged, the whole group when changed, and `{}` when reset to
    defaults; an instance submits nothing when unchanged, `null` to clear to
    inherit, or the replacement group (`capabilityOverrideForSubmit`). Only
-   runtimes whose catalog transport is `verified` (v1: omp) accept an
-   explicit tool policy — harness-managed runtimes lock the tools fieldset;
-   skill policies deliver as composed prompt sections from the
-   `list_buzz_prompt_skills` catalog (prompt text never leaves Rust).**Release
+   runtimes whose catalog transport is `verified` (v1: none; omp was
+   downgraded by HC-001) accept an explicit tool policy. Harness-managed
+   runtimes show a non-interactive managed state, while preserving a reset
+   control for stored incompatible policies; skill policies deliver as
+   composed prompt sections from the `list_buzz_prompt_skills` catalog (prompt
+   text never leaves Rust). **Release
    gate:** capability controls are hidden for provider-backed agents
    (`backend.type !== "local"`) and Save never sends an override for them
    until the external provider script exports the lossless
@@ -147,6 +149,7 @@ with a TypeScript lookup table or an id comparison in a component.
   (HC-003), and both tri-state submit contracts.
 - `desktop/tests/e2e/agent-capability-policy.spec.ts` — keyboard-only mode
   switch + selection + incompatibility announcement (HC-008), the
+  harness-managed tools disclosure and stored-policy reset, the
   provider-backed release-gate note, and the definition-dialog render.
 - `ui/agentConfigFieldsContract.test.mjs` — canonical behaviors + disclosure
   presets + `shouldShowModelStatusMessage` status-bypass +

@@ -4,7 +4,7 @@
 #
 # Checks, all against desktop/src-tauri/tauri.conf.json:
 #   app exists at /Applications/<productName>.app
-#   CFBundleName / CFBundleDisplayName == productName (and != "Buzz")
+#   configured productName == "Ruduzz"; bundle display names match it
 #   CFBundleIdentifier == identifier (identity continuity)
 #   CFBundleShortVersionString == version
 #   all five sidecars present and executable in Contents/MacOS
@@ -12,6 +12,7 @@ set -euo pipefail
 cd "$(git rev-parse --show-toplevel)"
 CONF=desktop/src-tauri/tauri.conf.json
 NAME=$(jq -r .productName "$CONF")
+EXPECTED_NAME=Ruduzz
 ID=$(jq -r .identifier "$CONF")
 VER=$(jq -r .version "$CONF")
 APP="/Applications/$NAME.app"
@@ -25,6 +26,7 @@ check() { # label expected actual
     fail=1
   fi
 }
+check productName "$EXPECTED_NAME" "$NAME"
 
 [[ -d "$APP" ]] || { echo "MISSING: $APP — run install-app.sh"; exit 1; }
 P="$APP/Contents/Info.plist"
@@ -33,7 +35,6 @@ check CFBundleName "$NAME" "$($PB -c 'Print :CFBundleName' "$P")"
 check CFBundleDisplayName "$NAME" "$($PB -c 'Print :CFBundleDisplayName' "$P")"
 check CFBundleIdentifier "$ID" "$($PB -c 'Print :CFBundleIdentifier' "$P")"
 check CFBundleShortVersionString "$VER" "$($PB -c 'Print :CFBundleShortVersionString' "$P")"
-[[ "$NAME" != "Buzz" ]] || { echo "  FAIL productName is stock 'Buzz' — run rename-app.sh"; fail=1; }
 
 for b in buzz buzz-acp buzz-agent buzz-dev-mcp git-credential-nostr; do
   [[ -x "$APP/Contents/MacOS/$b" ]] && printf '  ok   sidecar %-22s\n' "$b" \

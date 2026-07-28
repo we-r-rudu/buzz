@@ -104,6 +104,15 @@ export function CapabilityPolicyFields({
 }) {
   const noteId = `${idPrefix}-capability-note`;
   const toolsLocked = support?.toolPolicy !== "verified";
+  const toolModes = toolsLocked
+    ? ([["harness_default", "Harness defaults"]] as const)
+    : ([
+        ["harness_default", "Harness defaults"],
+        ["none", "None"],
+        ["selected", "Selected"],
+      ] as const);
+  const showToolModeControls =
+    !toolsLocked || draft.toolsMode !== "harness_default";
   // SPEC-006: preset/custom harnesses reject every explicit policy at the
   // save boundary — both fieldsets lock. Undefined source is the built-in
   // app default (blank runtime), so it does NOT lock skills.
@@ -269,14 +278,11 @@ export function CapabilityPolicyFields({
       {variant === "definition" || inheritFromDefinition === false ? (
         <>
           {/*
-            SPEC-R2-001: the fieldsets stay ENABLED when toolsLocked/
-            skillsLocked so the safe reset — "Harness defaults" / "Inherit" —
-            remains selectable (the §9 rollback); only the unsupported
-            choices (None/Selected + the selection checkboxes) disable.
-            Locking the whole fieldset trapped any stored non-default policy:
-            the draft blocked save, and the control that could clear it was
-            inside the disabled fieldset. The draft is still never
-            auto-mutated (HC-003) — resetting is a deliberate user action.
+            SPEC-R2-001: a supported policy renders the full editor. A locked
+            default renders as non-interactive status instead of dead controls.
+            If a stored non-default policy becomes incompatible, the
+            "Harness defaults" reset remains selectable so Save is never
+            trapped. The draft is still never auto-mutated (HC-003).
           */}
           <fieldset
             aria-describedby={blocked ? noteId : undefined}
@@ -285,38 +291,36 @@ export function CapabilityPolicyFields({
             <legend className="text-sm font-medium text-foreground">
               Tools
             </legend>
-            {(
-              [
-                ["harness_default", "Harness defaults"],
-                ["none", "None"],
-                ["selected", "Selected"],
-              ] as const
-            ).map(([mode, label]) => (
-              <label
-                className="flex items-center gap-2 text-sm text-foreground"
-                key={mode}
-              >
-                <input
-                  checked={draft.toolsMode === mode}
-                  className={CONTROL_CLASS}
-                  disabled={
-                    disabled || (mode !== "harness_default" && toolsLocked)
-                  }
-                  name={`${idPrefix}-tools-mode`}
-                  onChange={() => onDraftChange({ ...draft, toolsMode: mode })}
-                  type="radio"
-                />
-                {label}
-              </label>
-            ))}
+            {showToolModeControls ? (
+              toolModes.map(([mode, label]) => (
+                <label
+                  className="flex items-center gap-2 text-sm text-foreground"
+                  key={mode}
+                >
+                  <input
+                    checked={draft.toolsMode === mode}
+                    className={CONTROL_CLASS}
+                    disabled={disabled}
+                    name={`${idPrefix}-tools-mode`}
+                    onChange={() =>
+                      onDraftChange({ ...draft, toolsMode: mode })
+                    }
+                    type="radio"
+                  />
+                  {label}
+                </label>
+              ))
+            ) : (
+              <p className="text-sm text-foreground">Managed by harness</p>
+            )}
             {toolsLocked ? (
               <p className="text-xs text-muted-foreground">
-                {support == null
-                  ? "Choose a harness to edit the tool policy — without one, the app default manages its own tools."
-                  : "This harness manages its own tools; a structured tool policy isn't available."}
+                {draft.toolsMode === "harness_default"
+                  ? "Per-agent tool selection isn't supported by this harness yet."
+                  : "This saved policy isn't supported by the current harness. Choose Harness defaults to clear it."}
               </p>
             ) : null}
-            {draft.toolsMode === "selected" ? (
+            {!toolsLocked && draft.toolsMode === "selected" ? (
               <div className="grid max-h-40 grid-cols-1 gap-1 overflow-y-auto py-1 sm:grid-cols-2">
                 {TOOL_CAPABILITY_IDS.map((id) => (
                   <label
@@ -326,7 +330,7 @@ export function CapabilityPolicyFields({
                     <input
                       checked={draft.toolIds.includes(id)}
                       className={CONTROL_CLASS}
-                      disabled={disabled || toolsLocked}
+                      disabled={disabled}
                       onChange={() =>
                         onDraftChange({
                           ...draft,
@@ -419,10 +423,12 @@ export function CapabilityPolicyFields({
             ) : null}
           </fieldset>
 
-          <p className="text-xs text-muted-foreground">
-            Tool selection limits what the model can use; it is not a security
-            sandbox.
-          </p>
+          {!toolsLocked ? (
+            <p className="text-xs text-muted-foreground">
+              Tool selection limits what the model can use; it is not a security
+              sandbox.
+            </p>
+          ) : null}
 
           <div aria-live="polite" id={noteId} role="status">
             {blocked ? (

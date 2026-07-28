@@ -225,7 +225,7 @@ test.describe("agent capability policy", () => {
     ).not.toContainText("Save is blocked");
   });
 
-  test("definition dialog renders the policy section (harness-managed locks tools)", async ({
+  test("definition dialog explains harness-managed tools without dead controls", async ({
     page,
   }) => {
     // Persona-linked agents route Edit to the DEFINITION editor (see the
@@ -269,19 +269,15 @@ test.describe("agent capability policy", () => {
       timeout: 10_000,
     });
 
-    const toolsGroup = page.getByRole("group", { name: "Tools", exact: true });
-    await expect(toolsGroup).toContainText("manages its own tools");
-    // SPEC-R2-001: the unsafe choices disable on a harness-managed runtime,
-    // but the "Harness defaults" reset stays selectable (the §9 rollback).
-    await expect(
-      toolsGroup.getByRole("radio", { name: "Harness defaults" }),
-    ).toBeEnabled();
-    await expect(
-      toolsGroup.getByRole("radio", { name: "None" }),
-    ).toBeDisabled();
-    await expect(
-      toolsGroup.getByRole("radio", { name: "Selected" }),
-    ).toBeDisabled();
+    const toolsSection = page.getByRole("group", {
+      name: "Tools",
+      exact: true,
+    });
+    await expect(toolsSection).toContainText("Managed by harness");
+    await expect(toolsSection).toContainText(
+      "Per-agent tool selection isn't supported by this harness yet.",
+    );
+    await expect(toolsSection.getByRole("radio")).toHaveCount(0);
 
     // Skills stay editable: keyboard-switch Inherit → None via arrow keys.
     const skillsGroup = page.getByRole("group", { name: "Skills" });
@@ -353,21 +349,21 @@ test.describe("agent capability policy", () => {
     const harnessDefaultRadio = toolsGroup.getByRole("radio", {
       name: "Harness defaults",
     });
-    // The stored policy loads as the blocked draft: the unsupported choices
-    // stay disabled, the safe reset stays enabled, and Save is gated.
+    // The stored policy loads as a blocked draft. Dead choices stay hidden;
+    // only the safe reset remains rendered and enabled.
+    await expect(toolsGroup.getByRole("radio")).toHaveCount(1);
     await expect(
       toolsGroup.getByRole("radio", { name: "Selected" }),
-    ).toBeChecked();
-    await expect(
-      toolsGroup.getByRole("radio", { name: "Selected" }),
-    ).toBeDisabled();
+    ).toHaveCount(0);
     await expect(harnessDefaultRadio).toBeEnabled();
     await expect(submit).toBeDisabled();
 
     // The §9 rollback: select Harness defaults → Save unblocks → save
     // succeeds and the policy clears to baseline.
     await harnessDefaultRadio.click();
-    await expect(harnessDefaultRadio).toBeChecked();
+    await expect(
+      page.getByRole("group", { name: "Tools", exact: true }),
+    ).toContainText("Managed by harness");
     await expect(submit).toBeEnabled();
     await submit.click();
     await expect(page.getByTestId("persona-dialog")).toBeHidden({
@@ -383,11 +379,12 @@ test.describe("agent capability policy", () => {
     await expect(page.getByTestId("persona-dialog")).toBeVisible({
       timeout: 10_000,
     });
-    await expect(
-      page
-        .getByRole("group", { name: "Tools", exact: true })
-        .getByRole("radio", { name: "Harness defaults" }),
-    ).toBeChecked();
+    const toolsSection = page.getByRole("group", {
+      name: "Tools",
+      exact: true,
+    });
+    await expect(toolsSection).toContainText("Managed by harness");
+    await expect(toolsSection.getByRole("radio")).toHaveCount(0);
     await expect(
       page.locator("#persona-capability-capability-note"),
     ).not.toContainText("can't honor");
