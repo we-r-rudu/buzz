@@ -26,7 +26,7 @@ use buzz_core_pkg::kind::KIND_MANAGED_AGENT;
 use nostr::{EventBuilder, Kind, Tag};
 use serde::{Deserialize, Serialize};
 
-use super::{ManagedAgentRecord, RespondTo};
+use super::{AgentCapabilityPolicy, ManagedAgentRecord, RespondTo};
 
 /// The JSON body stored in a managed-agent event's content field.
 ///
@@ -57,6 +57,18 @@ pub struct ManagedAgentEventContent {
     /// public keys, not secrets.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub respond_to_allowlist: Vec<String>,
+    /// Instance-level capability policy override. Instance-level state like
+    /// `respond_to`/`parallelism`, so it is projected for ALL instances when
+    /// `Some` (NIP-AP 30177 slimming rules); absent when inheriting.
+    /// Deserialization is deliberately tolerant like the kind:30175 boundary:
+    /// unknown future ids/sub-groups are filtered, never event-fatal
+    /// (general-005).
+    #[serde(
+        default,
+        deserialize_with = "crate::managed_agents::types::deserialize_opt_capability_policy_tolerant",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub capability_policy_override: Option<AgentCapabilityPolicy>,
 }
 
 /// Project a `ManagedAgentRecord` onto the content fields published in
@@ -103,6 +115,7 @@ pub fn agent_event_content(record: &ManagedAgentRecord) -> ManagedAgentEventCont
         parallelism: record.parallelism,
         respond_to: record.respond_to,
         respond_to_allowlist: record.respond_to_allowlist.clone(),
+        capability_policy_override: record.capability_policy_override.clone(),
     }
 }
 
@@ -213,6 +226,8 @@ mod tests {
             definition_respond_to: None,
             definition_respond_to_allowlist: Vec::new(),
             definition_parallelism: None,
+            definition_capability_policy: Default::default(),
+            capability_policy_override: None,
             relay_mesh: None,
         }
     }
@@ -448,5 +463,106 @@ mod tests {
             .tags
             .iter()
             .all(|t| t.as_slice().first().map(String::as_str) != Some("e")));
+    }
+
+    #[test]
+    fn capability_override_projected_only_when_some() {
+        use crate::managed_agents::{AgentCapabilityPolicy, ToolPolicy};
+
+        // None (inherit) → omitted from the wire for BOTH linked and
+        // definition-less instances (absent-stable, no republish wave).
+        let mut record = sample_agent();
+        record.capability_policy_override = None;
+        let projected = agent_event_content(&record);
+        assert_eq!(projected.capability_policy_override, None);
+        let json = serde_json::to_string(&projected).unwrap();
+        assert!(!json.contains("capability_policy_override"), "{json}");
+
+        // Some → projected for ALL instances (instance-level state, like
+        // respond_to/parallelism per the 30177 slimming rules).
+        record.capability_policy_override = Some(AgentCapabilityPolicy {
+            tools: ToolPolicy::None,
+            skills: Default::default(),
+        });
+        let projected = agent_event_content(&record);
+        assert_eq!(
+            projected.capability_policy_override,
+            record.capability_policy_override
+        );
+        let json = serde_json::to_string(&projected).unwrap();
+        assert!(json.contains("capability_policy_override"), "{json}");
+
+        // Definition-less instances project it too.
+        record.persona_id = None;
+        let projected = agent_event_content(&record);
+        assert_eq!(
+            projected.capability_policy_override,
+            record.capability_policy_override
+        );
+
+        // And it parses back through the inbound path.
+        let event = build_agent_event(&record).unwrap();
+        let signed = event.sign_with_keys(&nostr::Keys::generate()).unwrap();
+        let parsed = managed_agent_content_from_event(&signed).unwrap();
+        assert_eq!(
+            parsed.capability_policy_override,
+            record.capability_policy_override
+        );
+    }
+
+    // ── general-005: NIP-AP unknown-id tolerance at the 30177 boundary ────
+
+    #[test]
+    fn future_override_ids_are_filtered_not_event_fatal() {
+        use crate::managed_agents::{
+            AgentCapabilityPolicy, SkillPolicy, ToolCapabilityId, ToolPolicy,
+        };
+
+        let content: ManagedAgentEventContent = serde_json::from_str(
+            r#"{"name":"A","parallelism":1,"respond_to":"anyone","capability_policy_override":{"tools":{"mode":"selected","selected":["files.read","quantum.entangle"]},"skills":{"mode":"selected","selected":["buzz-cli","future-skill"]}}}"#,
+        )
+        .expect("a future id must not fail the event parse");
+        assert_eq!(
+            content.capability_policy_override,
+            Some(AgentCapabilityPolicy {
+                tools: ToolPolicy::Selected {
+                    selected: vec![ToolCapabilityId::FilesRead],
+                },
+                skills: SkillPolicy::Selected {
+                    selected: vec!["buzz-cli".to_string()],
+                },
+            })
+        );
+    }
+
+    #[test]
+    fn all_unknown_override_drops_sub_groups_but_stays_present() {
+        use crate::managed_agents::{AgentCapabilityPolicy, ToolPolicy};
+
+        let content: ManagedAgentEventContent = serde_json::from_str(
+            r#"{"name":"A","parallelism":1,"respond_to":"anyone","capability_policy_override":{"tools":{"mode":"selected","selected":["quantum.entangle"]}}}"#,
+        )
+        .unwrap();
+        // The override stays present (the author's Some intent) with every
+        // sub-group dropped to its default — the protocol's safe state.
+        assert_eq!(
+            content.capability_policy_override,
+            Some(AgentCapabilityPolicy {
+                tools: ToolPolicy::HarnessDefault,
+                skills: Default::default(),
+            })
+        );
+        // …which re-omits on re-publish (Some(default) serializes as {}).
+        let json = serde_json::to_string(&content).unwrap();
+        assert!(json.contains("\"capability_policy_override\":{}"), "{json}");
+        // Absent and explicit-null overrides parse as inherit (None).
+        let absent: ManagedAgentEventContent =
+            serde_json::from_str(r#"{"name":"A","parallelism":1,"respond_to":"anyone"}"#).unwrap();
+        assert_eq!(absent.capability_policy_override, None);
+        let null: ManagedAgentEventContent = serde_json::from_str(
+            r#"{"name":"A","parallelism":1,"respond_to":"anyone","capability_policy_override":null}"#,
+        )
+        .unwrap();
+        assert_eq!(null.capability_policy_override, None);
     }
 }

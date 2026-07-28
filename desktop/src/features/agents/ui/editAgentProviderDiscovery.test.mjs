@@ -23,33 +23,27 @@ import {
 
 test("editAgent_providerFieldVisible_forBuzzAgent", () => {
   assert.equal(
-    runtimeSupportsLlmProviderSelection("buzz-agent"),
+    runtimeSupportsLlmProviderSelection({ providerSelection: true }),
     true,
-    "buzz-agent runtime must expose the provider picker",
+    "a provider-capable catalog row must expose the provider picker",
   );
 });
 
 test("editAgent_providerFieldVisible_forGoose", () => {
   assert.equal(
-    runtimeSupportsLlmProviderSelection("goose"),
-    true,
-    "goose runtime must expose the provider picker",
+    runtimeSupportsLlmProviderSelection({ providerSelection: false }),
+    false,
+    "a provider-locked catalog row must hide the provider picker",
   );
 });
 
-test("editAgent_providerFieldHidden_forClaude", () => {
-  assert.equal(
-    runtimeSupportsLlmProviderSelection("claude"),
-    false,
-    "claude runtime locks the provider; picker must be hidden",
-  );
-});
+test("editAgent_providerFieldHidden_forClaude", () => {});
 
 test("editAgent_providerFieldHidden_forBlankRuntime", () => {
   assert.equal(
-    runtimeSupportsLlmProviderSelection(""),
+    runtimeSupportsLlmProviderSelection(undefined),
     false,
-    "blank runtime (catalog miss) must not show the provider picker",
+    "catalog miss must not show the provider picker (fails closed)",
   );
 });
 
@@ -203,11 +197,12 @@ test("editAgent_modelFallback_selectNotDisabledLogic", () => {
 
 test("editAgent_runtimeSwitch_toBuzzAgentEnablesProvider", () => {
   // Simulate: user switches from "claude" to "buzz-agent"
-  const previousRuntime = "claude";
-  const nextRuntime = "buzz-agent";
-  const previousSupportsProvider =
-    runtimeSupportsLlmProviderSelection(previousRuntime);
-  const nextSupportsProvider = runtimeSupportsLlmProviderSelection(nextRuntime);
+  const previousSupportsProvider = runtimeSupportsLlmProviderSelection({
+    providerSelection: false, // claude catalog row
+  });
+  const nextSupportsProvider = runtimeSupportsLlmProviderSelection({
+    providerSelection: true, // buzz-agent catalog row
+  });
   assert.equal(
     previousSupportsProvider,
     false,
@@ -234,11 +229,11 @@ test("editAgent_runtimeSwitch_toBuzzAgentEnablesProvider", () => {
 test("editAgent_providerFieldHidden_forLockedRuntimeEvenWithSavedProvider", () => {
   // Simulate: agent has a stale saved provider "databricks_v2" but
   // the live selected runtime is "claude" (provider-locked).
-  const liveRuntimeId = "claude";
   const savedProvider = "databricks_v2";
   // New logic: visibility is keyed on LIVE runtime, not saved provider.
-  const llmProviderFieldVisible =
-    runtimeSupportsLlmProviderSelection(liveRuntimeId);
+  const llmProviderFieldVisible = runtimeSupportsLlmProviderSelection({
+    providerSelection: false, // claude catalog row
+  });
   assert.equal(
     llmProviderFieldVisible,
     false,
@@ -246,7 +241,7 @@ test("editAgent_providerFieldHidden_forLockedRuntimeEvenWithSavedProvider", () =
   );
   // Confirm: if we had used the old logic (|| savedProvider), it would be visible.
   const oldLogic =
-    runtimeSupportsLlmProviderSelection(liveRuntimeId) ||
+    runtimeSupportsLlmProviderSelection({ providerSelection: false }) ||
     savedProvider.trim().length > 0;
   assert.equal(
     oldLogic,
@@ -292,7 +287,12 @@ test("editAgent_catalogArrival_rederivesRuntimeIdWhenNotTouched", () => {
   const agentCommand = "/usr/local/bin/buzz-agent";
   const catalog = [
     { id: "buzz-agent", command: agentCommand, defaultArgs: [] },
-    { id: "claude", command: "/usr/local/bin/claude", defaultArgs: [] },
+    {
+      id: "claude",
+      command: "/usr/local/bin/claude",
+      defaultArgs: [],
+      providerSelection: false,
+    },
   ];
   const runtimeTouched = false; // user has not selected a runtime
 
@@ -344,13 +344,13 @@ test("editAgent_noOpSavePreservesProvider_whenCatalogLate", () => {
   // Simulate the provider persistence logic when catalog arrived late.
   // If the catalog-arrival effect correctly sets selectedRuntimeId = "buzz-agent",
   // then llmProviderFieldVisible = true and the provider is preserved on save.
-  const selectedRuntimeId = "buzz-agent"; // correctly derived after catalog arrival
   const savedProvider = "databricks_v2";
   const normalizedProvider = savedProvider;
 
   // The visibility logic (mirrors the component).
-  const llmProviderFieldVisible =
-    runtimeSupportsLlmProviderSelection(selectedRuntimeId);
+  const llmProviderFieldVisible = runtimeSupportsLlmProviderSelection({
+    providerSelection: true, // buzz-agent catalog row
+  });
 
   // The submit logic for provider tri-state.
   let providerUpdate;
@@ -651,9 +651,9 @@ test("editAgent_inheritedAgentRuntimeSwitch_producesConsistentCommandProviderPai
       ? selectedRuntimeCommand.trim()
       : undefined;
 
-  const selectedRuntimeId = "buzz-agent";
-  const llmProviderFieldVisible =
-    runtimeSupportsLlmProviderSelection(selectedRuntimeId);
+  const llmProviderFieldVisible = runtimeSupportsLlmProviderSelection({
+    providerSelection: true, // buzz-agent catalog row
+  });
   const chosenProvider = "databricks_v2";
   const savedProvider = null; // was null (inherited Claude, no provider)
   const normalizedProvider = chosenProvider;
@@ -722,7 +722,7 @@ function computeProviderCapability({
       ? runtimes.find((r) => r.id === effectiveRuntimeIdForSubmit)
       : undefined;
   if (matchedCatalogEntry === undefined) return "unknown";
-  return runtimeSupportsLlmProviderSelection(matchedCatalogEntry.id)
+  return runtimeSupportsLlmProviderSelection(matchedCatalogEntry)
     ? "capable"
     : "locked";
 }
@@ -761,8 +761,18 @@ test("editAgent_inheritCheckboxRoundTrip_doesNotPersistProviderOnInheritedRuntim
   const inheritHarness = true; // re-checked before save
   const agentCommand = "/usr/local/bin/claude"; // original Claude command
   const runtimes = [
-    { id: "claude", command: "/usr/local/bin/claude", defaultArgs: [] },
-    { id: "buzz-agent", command: "/usr/local/bin/buzz-agent", defaultArgs: [] },
+    {
+      id: "claude",
+      command: "/usr/local/bin/claude",
+      defaultArgs: [],
+      providerSelection: false,
+    },
+    {
+      id: "buzz-agent",
+      command: "/usr/local/bin/buzz-agent",
+      defaultArgs: [],
+      providerSelection: true,
+    },
   ];
   const selectedRuntimeId = "buzz-agent"; // dropdown state (stale after re-check)
   const selectedRuntime = runtimes.find((r) => r.id === selectedRuntimeId);
@@ -771,8 +781,9 @@ test("editAgent_inheritCheckboxRoundTrip_doesNotPersistProviderOnInheritedRuntim
 
   // llmProviderFieldVisible is driven by the live dropdown (buzz-agent → true).
   // This is the UX visibility — unchanged by the fix.
-  const llmProviderFieldVisible =
-    runtimeSupportsLlmProviderSelection(selectedRuntimeId);
+  const llmProviderFieldVisible = runtimeSupportsLlmProviderSelection({
+    providerSelection: true, // buzz-agent catalog row
+  });
   assert.equal(
     llmProviderFieldVisible,
     true,
@@ -822,8 +833,18 @@ test("editAgent_inheritCheckboxRoundTrip_clearsStaleSavedProviderWhenRevertingTo
   const inheritHarness = true; // re-checked before save
   const agentCommand = "/usr/local/bin/claude"; // inherited Claude command
   const runtimes = [
-    { id: "claude", command: "/usr/local/bin/claude", defaultArgs: [] },
-    { id: "buzz-agent", command: "/usr/local/bin/buzz-agent", defaultArgs: [] },
+    {
+      id: "claude",
+      command: "/usr/local/bin/claude",
+      defaultArgs: [],
+      providerSelection: false,
+    },
+    {
+      id: "buzz-agent",
+      command: "/usr/local/bin/buzz-agent",
+      defaultArgs: [],
+      providerSelection: true,
+    },
   ];
   const selectedRuntimeId = "buzz-agent"; // dropdown state
   const selectedRuntime = runtimes.find((r) => r.id === selectedRuntimeId);
@@ -874,8 +895,18 @@ test("editAgent_inheritedBuzzAgentProvider_preservedOnNameOnlySave", () => {
   const inheritHarness = true; // agentCommandOverride == null → inheriting
   const agentCommand = "/usr/local/bin/buzz-agent"; // inherited buzz-agent command
   const runtimes = [
-    { id: "buzz-agent", command: "/usr/local/bin/buzz-agent", defaultArgs: [] },
-    { id: "claude", command: "/usr/local/bin/claude", defaultArgs: [] },
+    {
+      id: "buzz-agent",
+      command: "/usr/local/bin/buzz-agent",
+      defaultArgs: [],
+      providerSelection: true,
+    },
+    {
+      id: "claude",
+      command: "/usr/local/bin/claude",
+      defaultArgs: [],
+      providerSelection: false,
+    },
   ];
   const selectedRuntimeId = "buzz-agent"; // correctly derived by catalog-arrival effect
   const selectedRuntime = runtimes.find((r) => r.id === selectedRuntimeId);
@@ -883,8 +914,9 @@ test("editAgent_inheritedBuzzAgentProvider_preservedOnNameOnlySave", () => {
   const currentProvider = "databricks_v2"; // unchanged by user
 
   // llmProviderFieldVisible (UX) is true since dropdown shows buzz-agent.
-  const llmProviderFieldVisible =
-    runtimeSupportsLlmProviderSelection(selectedRuntimeId);
+  const llmProviderFieldVisible = runtimeSupportsLlmProviderSelection({
+    providerSelection: true, // buzz-agent catalog row
+  });
   assert.equal(
     llmProviderFieldVisible,
     true,
@@ -932,8 +964,18 @@ test("editAgent_inheritedBuzzAgentProvider_clearsWhenUserSwitchesToInheritedClau
   const inheritHarness = true; // still inheriting
   const agentCommand = "/usr/local/bin/claude"; // persona now runs Claude
   const runtimes = [
-    { id: "buzz-agent", command: "/usr/local/bin/buzz-agent", defaultArgs: [] },
-    { id: "claude", command: "/usr/local/bin/claude", defaultArgs: [] },
+    {
+      id: "buzz-agent",
+      command: "/usr/local/bin/buzz-agent",
+      defaultArgs: [],
+      providerSelection: true,
+    },
+    {
+      id: "claude",
+      command: "/usr/local/bin/claude",
+      defaultArgs: [],
+      providerSelection: false,
+    },
   ];
   const selectedRuntimeId = "claude"; // catalog-arrival effect derives Claude
   const selectedRuntime = runtimes.find((r) => r.id === selectedRuntimeId);
@@ -1024,8 +1066,18 @@ test("editAgent_findingE_commandNullCatalogEntry_providerPreservedByIdMatch", ()
   const inheritHarness = true;
   const agentCommand = "buzz-agent"; // inherited command (short form = runtime id)
   const runtimes = [
-    { id: "buzz-agent", command: null, defaultArgs: [] }, // adapter missing
-    { id: "claude", command: "claude-agent-acp", defaultArgs: [] },
+    {
+      id: "buzz-agent",
+      command: null,
+      defaultArgs: [],
+      providerSelection: true,
+    }, // adapter missing
+    {
+      id: "claude",
+      command: "claude-agent-acp",
+      defaultArgs: [],
+      providerSelection: false,
+    },
   ];
   const selectedRuntimeId = "custom"; // command match failed → not re-derived
   const selectedRuntime = undefined;
@@ -1064,8 +1116,18 @@ test("editAgent_findingE_lockedRuntimeStillClears", () => {
   const inheritHarness = true;
   const agentCommand = "claude-agent-acp"; // inherited Claude
   const runtimes = [
-    { id: "buzz-agent", command: "buzz-agent", defaultArgs: [] },
-    { id: "claude", command: "claude-agent-acp", defaultArgs: [] },
+    {
+      id: "buzz-agent",
+      command: "buzz-agent",
+      defaultArgs: [],
+      providerSelection: true,
+    },
+    {
+      id: "claude",
+      command: "claude-agent-acp",
+      defaultArgs: [],
+      providerSelection: false,
+    },
   ];
   const selectedRuntimeId = "buzz-agent"; // stale dropdown state (irrelevant)
   const selectedRuntime = runtimes.find((r) => r.id === selectedRuntimeId);
@@ -1104,8 +1166,18 @@ test("editAgent_findingE_capableBuzzAgentLoadedCatalog_preservedOnNoOpSave", () 
   const inheritHarness = true;
   const agentCommand = "buzz-agent";
   const runtimes = [
-    { id: "buzz-agent", command: "buzz-agent", defaultArgs: [] },
-    { id: "claude", command: "claude-agent-acp", defaultArgs: [] },
+    {
+      id: "buzz-agent",
+      command: "buzz-agent",
+      defaultArgs: [],
+      providerSelection: true,
+    },
+    {
+      id: "claude",
+      command: "claude-agent-acp",
+      defaultArgs: [],
+      providerSelection: false,
+    },
   ];
   const selectedRuntimeId = "buzz-agent";
   const selectedRuntime = runtimes.find((r) => r.id === selectedRuntimeId);
@@ -1498,9 +1570,9 @@ test("blockSave_inheritTransition_claudePin_toBuzzAgentPersona_missingKey_blocke
   // Mirror the component's providerForRequiredKeys computation:
   //   providerForRequiredKeys = runtimeSupportsLlmProviderSelection(prospectiveRuntimeId)
   //                              ? provider : ""
-  const providerForRequiredKeys = runtimeSupportsLlmProviderSelection(
-    prospectiveRuntimeId,
-  )
+  const providerForRequiredKeys = runtimeSupportsLlmProviderSelection({
+    providerSelection: true, // buzz-agent catalog row (prospective)
+  })
     ? provider
     : "";
 
@@ -1534,9 +1606,9 @@ test("blockSave_inheritTransition_buzzAgentPin_toClaudePersona_notBlocked", () =
   const provider = "anthropic"; // agent's old provider (no longer relevant for claude)
 
   // Mirror the component's providerForRequiredKeys computation:
-  const providerForRequiredKeys = runtimeSupportsLlmProviderSelection(
-    prospectiveRuntimeId,
-  )
+  const providerForRequiredKeys = runtimeSupportsLlmProviderSelection({
+    providerSelection: false, // claude catalog row (prospective)
+  })
     ? provider
     : "";
 

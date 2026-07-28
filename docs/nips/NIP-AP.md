@@ -70,7 +70,11 @@ The `content` field is a **plaintext** (unencrypted) JSON object:
   "name_pool": ["<string>", ...],
   "respond_to": "<string | null>",
   "respond_to_allowlist": ["<64-hex pubkey>", ...],
-  "parallelism": "<integer | null>"
+  "parallelism": "<integer | null>",
+  "capability_policy": {
+    "tools": "<{ mode } | absent>",
+    "skills": "<{ mode } | absent>"
+  }
 }
 ```
 
@@ -93,6 +97,7 @@ The `content` field is a **plaintext** (unencrypted) JSON object:
 | `respond_to` | string \| null | `null` | **Reserved.** Default respond-to policy for instances spawned from this definition: `"anyone"`, `"owner-only"`, or `"allowlist"`. `null` defers to the client default. |
 | `respond_to_allowlist` | string[] | `[]` | **Reserved.** Allowlisted author pubkeys (64-char lowercase hex) when `respond_to` is `"allowlist"`. Ignored otherwise. |
 | `parallelism` | integer \| null | `null` | **Reserved.** Default max concurrent turns for spawned instances. `null` defers to the client default. |
+| `capability_policy` | object | absent | Harness-neutral tool/skill policy. `tools` is `{ "mode": "none" }` or `{ "mode": "selected", "selected": ["<capability-id>", ...] }`; `skills` is the same shape with Buzz prompt-skill ids. Each sub-group is omitted at its default (`harness_default` tools / `inherit` skills); the whole field is omitted when both default. Capability ids are stable dotted strings: `files.read`, `files.write`, `code.search`, `code.intelligence`, `shell.execute`, `browser`, `web.search`, `subagents`, `task.tracking`, `image.inspect`. Readers MUST ignore unknown ids and unknown sub-groups. |
 
 The behavioral fields (`respond_to`, `respond_to_allowlist`,
 `parallelism`) are definition-level *defaults*: a spawned instance copies them
@@ -107,6 +112,21 @@ not emit them. The instance-copy-at-creation behavior activates in a
 subsequent release (the create-path unification). Until then a definition
 carrying these fields round-trips through the wire type but the values do not
 survive a local edit-and-republish cycle.
+
+`capability_policy` is serialized **absent-stable**: writers omit the field
+(and each defaulting sub-group) whenever it matches harness defaults, so a
+definition that never sets a policy keeps byte-identical content — and a
+stable `persona_source_version` drift hash — across the upgrade, and setting
+a policy back to defaults re-omits the field. A policy edit changes the
+content and therefore trips the drift badge on linked instances, exactly like
+a prompt edit. Mixed-version caveat: a client that predates this field parses
+new events fine (unknown fields are ignored) but DROPS the group when
+re-publishing after a local edit, reverting the definition to harness
+defaults on every synced device — the same precedent as the behavioral-quad
+activation above. Instance-level overrides travel on kind:30177 as
+`capability_policy_override` (same object shape; absent/`null` = inherit the
+linked definition): it is instance-level state, projected for ALL instances
+when present, per the 30177 slimming rules below.
 
 Unknown fields MUST be ignored by readers (forward compatibility).
 
@@ -188,7 +208,7 @@ to carry only instance-level state:
   kind:30177 events **for definition-linked instances**. Those resolve
   through the linked kind:30175 definition. Writers continue to publish
   instance-level fields (name, linked definition id, `respond_to` +
-  allowlist, `parallelism`).
+  allowlist, `parallelism`, `capability_policy_override`).
 - **Exception — definition-less instances:** an instance with no linked
   definition is its own definition; writers MUST keep emitting the
   definition-level fields for such instances. (Rationale: old readers
@@ -211,6 +231,14 @@ definitions published by newer clients. This is a benign divergence —
 old devices simply do not see new-style definitions until upgraded — not
 data corruption. Implementations SHOULD log dropped events rather than
 surface per-event errors.
+
+The same tolerance applies to `capability_policy` (30175) and
+`capability_policy_override` (30177): old readers ignore both. An old client
+that edits and re-publishes a definition drops the policy group, reverting
+that definition to harness defaults on every synced device. The divergence is
+visible (the policy disappears from newer clients' editors) and never a parse
+failure or silent arg corruption: with no policy bytes, the harness runs its
+default tool set.
 
 ### NIP-OA (Owner Attestation)
 

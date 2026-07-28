@@ -1,5 +1,8 @@
 import type { Page } from "@playwright/test";
-import type { ChannelTemplate } from "../../src/shared/api/types";
+import type {
+  AgentCapabilityPolicy,
+  ChannelTemplate,
+} from "../../src/shared/api/types";
 import { FEATURE_OVERRIDES_STORAGE_KEY, PREVIEW_FEATURE_IDS } from "./features";
 
 export const TEST_IDENTITIES = {
@@ -103,6 +106,9 @@ type MockPersonaSeed = {
   /** Provider pinned on the persona. Leave empty for Codex/Claude runtimes. */
   provider?: string | null;
   namePool?: string[];
+  /** Stored capability policy (e.g. an incompatible tools policy for the
+   *  SPEC-R2-001 recovery flow). Omitted → harness defaults. */
+  capabilityPolicy?: AgentCapabilityPolicy | null;
 };
 
 type MockTeamSeed = {
@@ -206,6 +212,10 @@ type MockBridgeOptions = {
     acp?: MockCommandAvailability;
     mcp?: MockCommandAvailability;
   };
+  /** Backend providers returned by `discover_backend_providers` (default []).
+   *  Seeded providers also answer `probe_backend_provider` successfully, so
+   *  specs can drive the provider destination picker (SPEC-007 e2e). */
+  backendProviders?: { id: string; binaryPath?: string }[];
   managedAgents?: MockManagedAgentSeed[];
   /** Per agent+relay runtime rows for pair-scoped lifecycle commands. */
   managedAgentRuntimes?: Array<{

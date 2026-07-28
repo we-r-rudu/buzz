@@ -63,6 +63,8 @@ fn make_agent(
         is_active: true,
         source_team: None,
         source_team_persona_slug: None,
+        definition_capability_policy: Default::default(),
+        capability_policy_override: None,
         relay_mesh: None,
         auto_restart_on_config_change: false,
         definition_respond_to: None,

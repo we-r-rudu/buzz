@@ -199,6 +199,23 @@ pub struct AuthAgentArgs {
         value_delimiter = ','
     )]
     pub agent_args: Vec<String>,
+
+    /// Arguments passed to the agent binary as a JSON array of strings
+    /// (e.g. `["--tools=read,grep","acp"]`). Lossless alternative to
+    /// `--agent-args` for comma-bearing args. When present (including `[]`),
+    /// this wins over `--agent-args` entirely — no merging.
+    ///
+    /// Mixed-version caveat: a NEW desktop emitting both vars combined with a
+    /// deliberately downgraded buzz-acp binary ignores this JSON var and
+    /// splits comma-bearing args via CSV (the bundled sidecar makes this
+    /// non-default; accepted). Legacy CSV stays supported for one
+    /// compatibility window minimum.
+    #[arg(
+        long,
+        env = "BUZZ_ACP_AGENT_ARGS_JSON",
+        value_parser = |value: &str| parse_agent_args_json(value).map(AgentArgsJson)
+    )]
+    pub agent_args_json: Option<AgentArgsJson>,
 }
 
 /// CLI args for `buzz-acp auth-methods` — query adapter-advertised login methods.
@@ -257,6 +274,23 @@ pub struct CliArgs {
         value_delimiter = ','
     )]
     pub agent_args: Vec<String>,
+
+    /// Arguments passed to the agent binary as a JSON array of strings
+    /// (e.g. `["--tools=read,grep","acp"]`). Lossless alternative to
+    /// `--agent-args` for comma-bearing args. When present (including `[]`),
+    /// this wins over `--agent-args` entirely — no merging.
+    ///
+    /// Mixed-version caveat: a NEW desktop emitting both vars combined with a
+    /// deliberately downgraded buzz-acp binary ignores this JSON var and
+    /// splits comma-bearing args via CSV (the bundled sidecar makes this
+    /// non-default; accepted). Legacy CSV stays supported for one
+    /// compatibility window minimum.
+    #[arg(
+        long,
+        env = "BUZZ_ACP_AGENT_ARGS_JSON",
+        value_parser = |value: &str| parse_agent_args_json(value).map(AgentArgsJson)
+    )]
+    pub agent_args_json: Option<AgentArgsJson>,
 
     #[arg(long, env = "BUZZ_ACP_MCP_COMMAND", default_value = "")]
     pub mcp_command: String,
@@ -696,9 +730,41 @@ pub(crate) fn normalize_agent_command_identity(command: &str) -> String {
         .collect()
 }
 
+/// Parsed `--agent-args-json` / `BUZZ_ACP_AGENT_ARGS_JSON` payload.
+///
+/// Newtype around the JSON string array because clap derive treats a
+/// `Vec<T>` field as a repeat-to-append container (one `T` per occurrence);
+/// wrapping the array makes the whole JSON payload a single flag value.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentArgsJson(pub Vec<String>);
+
+/// clap `value_parser` for `--agent-args-json` / `BUZZ_ACP_AGENT_ARGS_JSON`:
+/// parse a JSON array of strings (e.g. `["--tools=read,grep","acp"]`).
+///
+/// Fails closed: malformed JSON, a non-array payload, or any non-string
+/// element is a hard parse error (clap exits non-zero) — never a silent
+/// fallback to the CSV `--agent-args` transport.
+fn parse_agent_args_json(value: &str) -> Result<Vec<String>, String> {
+    let parsed: serde_json::Value = serde_json::from_str(value)
+        .map_err(|e| format!("--agent-args-json must be a JSON array of strings: {e}"))?;
+    let elements = parsed
+        .as_array()
+        .ok_or_else(|| "--agent-args-json must be a JSON array of strings".to_string())?;
+    elements
+        .iter()
+        .map(|element| {
+            element
+                .as_str()
+                .map(str::to_string)
+                .ok_or_else(|| "--agent-args-json elements must all be strings".to_string())
+        })
+        .collect()
+}
+
 fn default_agent_args(command: &str) -> Option<Vec<String>> {
     match normalize_agent_command_identity(command).as_str() {
         "goose" => Some(vec!["acp".to_string()]),
+        "omp" | "oh-my-pi" => Some(vec!["acp".to_string()]),
         "codex" | "codex-acp" | "claude-agent-acp" | "claude-code-acp" | "claude-code"
         | "claudecode" | "buzz-agent" => Some(Vec::new()),
         _ => None,
@@ -892,7 +958,14 @@ impl Config {
             ));
         }
 
-        let agent_args = normalize_agent_args(&agent_command, args.agent_args);
+        // JSON transport wins over CSV whenever present (including `[]`),
+        // then the shared normalize pipeline applies unchanged.
+        let agent_args = normalize_agent_args(
+            &agent_command,
+            args.agent_args_json
+                .map(|json| json.0)
+                .unwrap_or(args.agent_args),
+        );
 
         if let Some(ref channels) = args.channels {
             for ch in channels {
@@ -1527,6 +1600,20 @@ mod tests {
     fn normalizes_goose_args_to_acp() {
         assert_eq!(normalize_agent_args("goose", Vec::new()), vec!["acp"]);
         assert_eq!(normalize_agent_args("goose", vec!["".into()]), vec!["acp"]);
+    }
+
+    #[test]
+    fn normalizes_omp_args_to_acp() {
+        assert_eq!(normalize_agent_args("omp", Vec::new()), vec!["acp"]);
+        assert_eq!(
+            normalize_agent_args("oh-my-pi", vec!["".into()]),
+            vec!["acp"]
+        );
+        // Explicit args are preserved (no default injection).
+        assert_eq!(
+            normalize_agent_args("omp", vec!["acp".into(), "--verbose".into()]),
+            vec!["acp", "--verbose"]
+        );
     }
 
     #[test]
@@ -2853,5 +2940,159 @@ channels = "ALL"
     fn compose_session_title_drops_the_channel_when_the_agent_name_fills_the_cap() {
         let agent = "a".repeat(SESSION_TITLE_MAX_CHARS);
         assert_eq!(compose_session_title(&agent, Some("buzz-dev")), agent);
+    }
+
+    // --- BUZZ_ACP_AGENT_ARGS_JSON transport: parse, precedence, fail-closed ---
+
+    #[test]
+    fn agent_args_json_wins_over_csv_and_preserves_commas() {
+        let args = CliArgs::try_parse_from([
+            "buzz-acp",
+            "--private-key",
+            TEST_PRIVATE_KEY,
+            "--agent-command",
+            "my-custom-agent",
+            "--agent-args",
+            "csv-one,csv-two",
+            "--agent-args-json",
+            r#"["--tools=read,grep","acp"]"#,
+        ])
+        .expect("clap should parse args");
+        let config = Config::from_args(args).expect("config should build");
+        // JSON wins entirely (no merging), and the comma inside
+        // `--tools=read,grep` survives as a single arg — the CSV transport
+        // cannot carry this.
+        assert_eq!(config.agent_args, vec!["--tools=read,grep", "acp"]);
+    }
+
+    #[test]
+    fn empty_agent_args_json_is_a_meaningful_zero_arg_override() {
+        // codex-acp's own defaults are empty, so JSON [] resolves to [].
+        let args = CliArgs::try_parse_from([
+            "buzz-acp",
+            "--private-key",
+            TEST_PRIVATE_KEY,
+            "--agent-command",
+            "codex-acp",
+            "--agent-args-json",
+            "[]",
+        ])
+        .expect("clap should parse args");
+        let config = Config::from_args(args).expect("config should build");
+        assert_eq!(config.agent_args, Vec::<String>::new());
+
+        // Sharper no-fallback proof: a custom command has no default
+        // injection, so falling back to the CSV value would be observable.
+        let args = CliArgs::try_parse_from([
+            "buzz-acp",
+            "--private-key",
+            TEST_PRIVATE_KEY,
+            "--agent-command",
+            "my-custom-agent",
+            "--agent-args",
+            "csv-one,csv-two",
+            "--agent-args-json",
+            "[]",
+        ])
+        .expect("clap should parse args");
+        let config = Config::from_args(args).expect("config should build");
+        assert_eq!(config.agent_args, Vec::<String>::new());
+    }
+
+    #[test]
+    fn empty_agent_args_json_still_gets_default_injection_for_omp() {
+        // After precedence, normalize_agent_args applies unchanged: an empty
+        // JSON vec for omp normalizes to ["acp"] via default_agent_args.
+        let args = CliArgs::try_parse_from([
+            "buzz-acp",
+            "--private-key",
+            TEST_PRIVATE_KEY,
+            "--agent-command",
+            "omp",
+            "--agent-args-json",
+            "[]",
+        ])
+        .expect("clap should parse args");
+        let config = Config::from_args(args).expect("config should build");
+        assert_eq!(config.agent_args, vec!["acp"]);
+    }
+
+    #[test]
+    fn legacy_acp_arg_via_json_still_normalizes_away_for_zero_arg_agents() {
+        // The JSON transport feeds the same normalize pipeline: legacy
+        // ["acp"] still collapses to [] for zero-arg runtimes.
+        let args = CliArgs::try_parse_from([
+            "buzz-acp",
+            "--private-key",
+            TEST_PRIVATE_KEY,
+            "--agent-command",
+            "codex-acp",
+            "--agent-args-json",
+            r#"["acp"]"#,
+        ])
+        .expect("clap should parse args");
+        let config = Config::from_args(args).expect("config should build");
+        assert_eq!(config.agent_args, Vec::<String>::new());
+    }
+
+    #[test]
+    fn malformed_agent_args_json_fails_closed() {
+        // Not JSON, a non-array payload, a non-string element, and a bare
+        // string must all be clap parse errors (exit non-zero) — never a
+        // silent fallback to CSV.
+        for bad in [
+            "not json",
+            r#"{"a":1}"#,
+            r#"["ok",42]"#,
+            r#""just a string""#,
+        ] {
+            let args = CliArgs::try_parse_from([
+                "buzz-acp",
+                "--private-key",
+                TEST_PRIVATE_KEY,
+                "--agent-args-json",
+                bad,
+            ]);
+            assert!(
+                args.is_err(),
+                "malformed --agent-args-json {bad:?} must be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn csv_agent_args_behave_as_before_when_json_absent() {
+        let args = CliArgs::try_parse_from([
+            "buzz-acp",
+            "--private-key",
+            TEST_PRIVATE_KEY,
+            "--agent-command",
+            "my-custom-agent",
+            "--agent-args",
+            "a,b",
+        ])
+        .expect("clap should parse args");
+        assert!(args.agent_args_json.is_none());
+        let config = Config::from_args(args).expect("config should build");
+        assert_eq!(config.agent_args, vec!["a", "b"]);
+    }
+
+    #[test]
+    fn models_args_route_agent_args_json_to_auth_agent_args() {
+        let args = ModelsArgs::try_parse_from([
+            "buzz-acp models",
+            "--agent-args-json",
+            r#"["--tools=read,grep","acp"]"#,
+        ])
+        .expect("clap should parse args");
+        assert_eq!(
+            args.agent.agent_args_json,
+            Some(AgentArgsJson(vec![
+                "--tools=read,grep".to_string(),
+                "acp".to_string()
+            ]))
+        );
+        // The CSV default is still populated but loses precedence downstream.
+        assert_eq!(args.agent.agent_args, vec!["acp"]);
     }
 }

@@ -54,6 +54,8 @@ fn record() -> ManagedAgentRecord {
         definition_respond_to: None,
         definition_respond_to_allowlist: Vec::new(),
         definition_parallelism: None,
+        definition_capability_policy: Default::default(),
+        capability_policy_override: None,
         relay_mesh: None,
     }
 }
@@ -76,6 +78,7 @@ fn persona(id: &str, runtime: Option<&str>, prompt: &str) -> AgentDefinition {
         respond_to: None,
         respond_to_allowlist: Vec::new(),
         parallelism: None,
+        capability_policy: Default::default(),
         created_at: "now".into(),
         updated_at: "now".into(),
     }
@@ -760,4 +763,189 @@ fn spawn_hash_instance_args_win_over_definition_args() {
         h_instance, h_no_instance,
         "instance args and definition args must produce different hashes"
     );
+}
+
+// ── Capability-policy restart semantics (§6) ────────────────────────────────
+//
+// The policy needs no dedicated hash input: a skill selection/content edit
+// changes the composed `resolved_prompt` (digested), and — for a future
+// launch-tested transport — a compiled flag edit changes `descriptor.args`
+// (also digested; pinned at the compile level by
+// `fixture_transport_mapping_change_alters_compiled_args`). v1 ships NO
+// verified transport (HC-001, `docs/hc001-omp-capability-transport.md`):
+// every explicit tool policy is refused at the descriptor seam, so the
+// tool-policy pins here assert the refusal instead of a hash delta.
+
+use crate::managed_agents::{AgentCapabilityPolicy, SkillPolicy, ToolCapabilityId, ToolPolicy};
+
+fn omp_record() -> ManagedAgentRecord {
+    let mut rec = record();
+    rec.runtime = Some("omp".into());
+    rec
+}
+
+fn hash(rec: &ManagedAgentRecord) -> u64 {
+    spawn_config_hash(rec, &[], &[], "wss://ws.example", &Default::default())
+}
+
+fn tools_policy(ids: &[ToolCapabilityId]) -> AgentCapabilityPolicy {
+    AgentCapabilityPolicy {
+        tools: ToolPolicy::Selected {
+            selected: ids.to_vec(),
+        },
+        skills: SkillPolicy::Inherit,
+    }
+}
+
+#[test]
+fn tool_policy_selected_on_omp_refuses_the_descriptor() {
+    // Post-HC-001 there is no verified transport, so a stored explicit tool
+    // policy (only reachable via a hand-edited store — save rejects it)
+    // refuses spawn/deploy visibly through the descriptor, like a dangling
+    // harness. The hash itself is moot for an agent that cannot spawn.
+    let mut edited = omp_record();
+    edited.capability_policy_override = Some(tools_policy(&[ToolCapabilityId::FilesRead]));
+    let err = crate::managed_agents::resolve_effective_harness_descriptor(
+        &edited,
+        &[],
+        &Default::default(),
+    )
+    .unwrap_err();
+    assert!(err.contains("files.read"), "{err}");
+}
+
+#[test]
+fn tool_policy_none_on_omp_refuses_the_descriptor() {
+    let mut edited = omp_record();
+    edited.capability_policy_override = Some(AgentCapabilityPolicy {
+        tools: ToolPolicy::None,
+        skills: SkillPolicy::Inherit,
+    });
+    assert!(crate::managed_agents::resolve_effective_harness_descriptor(
+        &edited,
+        &[],
+        &Default::default(),
+    )
+    .is_err());
+}
+
+#[test]
+fn skill_selection_edit_changes_hash() {
+    let baseline = omp_record();
+    let mut edited = omp_record();
+    edited.capability_policy_override = Some(AgentCapabilityPolicy {
+        tools: ToolPolicy::HarnessDefault,
+        skills: SkillPolicy::Selected {
+            selected: vec!["buzz-cli".to_string()],
+        },
+    });
+    assert_ne!(hash(&baseline), hash(&edited));
+}
+
+#[test]
+fn skill_content_edit_changes_hash() {
+    // Skill content reaches the hash through the composed prompt
+    // (`resolved_prompt`). Compose with two fixture catalogs that differ only
+    // in prompt content and digest both exactly as `spawn_config_hash` does —
+    // the hash input must change when skill content changes.
+    use crate::managed_agents::prompt_skills::BuzzPromptSkill;
+    use std::hash::{DefaultHasher, Hash, Hasher};
+
+    let catalog_a = &[BuzzPromptSkill {
+        id: "fixture",
+        label: "Fixture",
+        description: "",
+        prompt: "version one",
+    }];
+    let catalog_b = &[BuzzPromptSkill {
+        id: "fixture",
+        label: "Fixture",
+        description: "",
+        prompt: "version two",
+    }];
+    let ids = vec!["fixture".to_string()];
+    let prompt_a = crate::managed_agents::effective_config::compose_final_prompt_from(
+        Some("Base.".to_string()),
+        &ids,
+        catalog_a,
+    )
+    .unwrap();
+    let prompt_b = crate::managed_agents::effective_config::compose_final_prompt_from(
+        Some("Base.".to_string()),
+        &ids,
+        catalog_b,
+    )
+    .unwrap();
+    assert_ne!(prompt_a, prompt_b, "content edit must change the prompt");
+
+    let digest = |prompt: &Option<String>| {
+        let mut hasher = DefaultHasher::new();
+        prompt.hash(&mut hasher);
+        hasher.finish()
+    };
+    assert_ne!(digest(&prompt_a), digest(&prompt_b));
+}
+
+#[test]
+fn default_policy_record_hash_matches_pre_feature_baseline() {
+    // HC: adding the feature must not badge every existing agent. The formula
+    // keys off RESOLVED values, not stored bytes: a legacy record (no policy
+    // bytes → serde default) and the same record carrying an explicit default
+    // override (different bytes, same resolved policy) hash identically.
+    let legacy: ManagedAgentRecord = serde_json::from_str(
+        r#"{
+            "pubkey": "abcd1234",
+            "name": "test-agent",
+            "private_key_nsec": "nsec1fake",
+            "relay_url": "wss://localhost:3000",
+            "acp_command": "buzz-acp",
+            "agent_command": "goose",
+            "agent_args": [],
+            "mcp_command": "",
+            "turn_timeout_seconds": 320,
+            "system_prompt": null,
+            "created_at": "2026-01-01T00:00:00Z",
+            "updated_at": "2026-01-01T00:00:00Z",
+            "last_started_at": null,
+            "last_stopped_at": null,
+            "last_exit_code": null,
+            "last_error": null
+        }"#,
+    )
+    .expect("legacy record");
+    let mut explicit_default = legacy.clone();
+    explicit_default.capability_policy_override = Some(AgentCapabilityPolicy::default());
+    explicit_default.definition_capability_policy = AgentCapabilityPolicy::default();
+    assert_eq!(hash(&legacy), hash(&explicit_default));
+}
+
+#[test]
+fn fixture_transport_mapping_change_alters_compiled_args() {
+    // Same selection compiled against two fixture transports: the mapping
+    // table itself drives the emitted flag (and therefore the hash, via
+    // `descriptor.args`, for any future launch-tested runtime). v1 ships no
+    // verified transport (HC-001), so this pins the compile-level contract
+    // against fixtures derived from `VERIFIED_FIXTURE_TRANSPORT`.
+    use crate::managed_agents::capability_compiler::compile_capability_policy;
+    use crate::managed_agents::discovery::{
+        CapabilityToolMapping, CapabilityTransport, VERIFIED_FIXTURE_TRANSPORT,
+    };
+
+    let mut runtime_a = crate::managed_agents::EMPTY_RUNTIME;
+    runtime_a.capability_transport = VERIFIED_FIXTURE_TRANSPORT;
+    let mut runtime_b = runtime_a;
+    runtime_b.capability_transport = CapabilityTransport {
+        tool_mappings: &[CapabilityToolMapping {
+            capability: ToolCapabilityId::FilesRead,
+            native_tools: &["read", "fs_read"],
+        }],
+        ..VERIFIED_FIXTURE_TRANSPORT
+    };
+    let policy = tools_policy(&[ToolCapabilityId::FilesRead]);
+    let base = vec!["acp".to_string()];
+    let real = compile_capability_policy(Some(&runtime_a), &policy, base.clone()).unwrap();
+    let fixtured = compile_capability_policy(Some(&runtime_b), &policy, base).unwrap();
+    assert_eq!(real, vec!["--tools=read", "acp"]);
+    assert_eq!(fixtured, vec!["--tools=read,fs_read", "acp"]);
+    assert_ne!(real, fixtured);
 }

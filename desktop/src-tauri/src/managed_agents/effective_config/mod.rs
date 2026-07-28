@@ -7,7 +7,7 @@ use super::relay_mesh::{
     RELAY_MESH_API_BASE_URL, RELAY_MESH_API_KEY_PLACEHOLDER, RELAY_MESH_AUTO_MODEL_ID,
     RELAY_MESH_PROVIDER_ID,
 };
-use super::types::{AgentDefinition, ManagedAgentRecord};
+use super::types::{AgentCapabilityPolicy, AgentDefinition, ManagedAgentRecord, SkillPolicy};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -15,6 +15,10 @@ pub enum ConfigSource {
     Definition,
     Global,
     InstanceLegacy,
+    /// A linked instance's own `capability_policy_override` won over the
+    /// definition's policy (capability resolution only — model/provider/
+    /// prompt never use this variant).
+    InstanceOverride,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -27,7 +31,24 @@ pub struct ResolvedField<T> {
 pub struct EffectiveAgentConfig {
     pub model: ResolvedField<String>,
     pub provider: ResolvedField<String>,
+    /// The composed FINAL prompt: persona/base text plus any selected skill
+    /// sections (§5). Every delivery consumer — the spawn env write
+    /// (`BUZZ_ACP_SYSTEM_PROMPT`), `spawn_config_hash`, and the provider
+    /// deploy payload — reads this value, so skills are delivered identically
+    /// on all three paths.
     pub system_prompt: ResolvedField<String>,
+    /// The raw persona/instance prompt WITHOUT skill sections, same origin
+    /// rules as `system_prompt` had pre-feature. Preserved for display needs.
+    /// Not consumed yet — kept for the resolved-config contract (§2), same
+    /// precedent as `EffectiveAgentEnv::config_file_path`.
+    #[allow(dead_code)]
+    pub base_system_prompt: ResolvedField<String>,
+    /// The resolved capability policy (override → definition → default).
+    /// Consumers that need ONLY the policy call
+    /// `resolve_effective_capability_policy` directly (descriptor seam); this
+    /// field keeps the one-resolve contract complete for display consumers.
+    #[allow(dead_code)]
+    pub capability_policy: AgentCapabilityPolicy,
 }
 
 impl EffectiveAgentConfig {
@@ -65,16 +86,131 @@ pub enum EffectiveConfigResult {
         record_pubkey: String,
         missing_persona_id: String,
     },
+    /// The stored policy cannot be honored (e.g. an unknown skill id in a
+    /// hand-edited store). Spawn/deploy refuse visibly via
+    /// `require_resolved`; summary/hash degrade exactly like the orphan arm.
+    InvalidPolicy {
+        error: String,
+    },
 }
 
 fn non_blank(v: Option<&str>) -> Option<&str> {
     v.filter(|s| !s.trim().is_empty())
 }
 
+/// The capability policy resolved for a record, with its origin.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedCapabilityPolicy {
+    pub policy: AgentCapabilityPolicy,
+    pub source: ConfigSource,
+}
+
+/// Resolve the effective capability policy for `record`:
+/// - Linked instance: `capability_policy_override` (Some) → `InstanceOverride`;
+///   else the live definition's non-default policy → `Definition`; else the
+///   default policy → `Global` (labels the "came from defaults" origin —
+///   `GlobalAgentConfig` itself carries NO policy layer).
+/// - Definition-less: override (Some) → `InstanceLegacy`; else default.
+/// - Orphan: default policy (spawn/deploy refuse the orphan elsewhere via
+///   `require_resolved`; the hash degrades like prompt/model/provider).
+pub fn resolve_effective_capability_policy(
+    record: &ManagedAgentRecord,
+    definitions: &[AgentDefinition],
+    _global: &GlobalAgentConfig,
+) -> ResolvedCapabilityPolicy {
+    if let Some(pid) = &record.persona_id {
+        if let Some(definition) = definitions.iter().find(|d| d.id == *pid) {
+            if let Some(override_policy) = &record.capability_policy_override {
+                return ResolvedCapabilityPolicy {
+                    policy: override_policy.clone(),
+                    source: ConfigSource::InstanceOverride,
+                };
+            }
+            if !definition.capability_policy.is_default() {
+                return ResolvedCapabilityPolicy {
+                    policy: definition.capability_policy.clone(),
+                    source: ConfigSource::Definition,
+                };
+            }
+        }
+        // Orphan (missing definition) or definition with a default policy.
+        return ResolvedCapabilityPolicy {
+            policy: AgentCapabilityPolicy::default(),
+            source: ConfigSource::Global,
+        };
+    }
+    if let Some(override_policy) = &record.capability_policy_override {
+        return ResolvedCapabilityPolicy {
+            policy: override_policy.clone(),
+            source: ConfigSource::InstanceLegacy,
+        };
+    }
+    ResolvedCapabilityPolicy {
+        policy: AgentCapabilityPolicy::default(),
+        source: ConfigSource::Global,
+    }
+}
+
+/// Compose the final prompt from the base (persona/instance) prompt and the
+/// resolved policy's skill selection. `Inherit`/`None` skills return the
+/// base bytes untouched; `Selected` appends deterministic
+/// `"\n\n[Skill: {label}]\n{prompt}"` sections (ids sorted ascending).
+/// Unknown skill ids fail loudly (a hand-edited store must not silently
+/// drop); the composed-final 128 KiB cap is re-checked here as defense in
+/// depth behind the save boundary.
+///
+/// Prefix of the composed-prompt cap error. The inbound kind:30177 boundary
+/// ([`downgrade_over_cap_inbound_override`]) gates on it so ONLY the cap
+/// triggers a downgrade — an unknown skill id from a hand-edited store must
+/// stay the loud InvalidPolicy-at-resolve failure it is locally.
+pub(crate) const COMPOSED_CAP_ERROR_PREFIX: &str = "composed prompt exceeds the";
+fn compose_final_prompt(
+    base_prompt: ResolvedField<String>,
+    policy: &AgentCapabilityPolicy,
+) -> Result<ResolvedField<String>, String> {
+    let SkillPolicy::Selected { selected } = &policy.skills else {
+        return Ok(base_prompt);
+    };
+    let sections = super::prompt_skills::compose_skill_sections(selected)?;
+    let base = base_prompt.value.unwrap_or_default();
+    let composed_len = base.len() + sections.len();
+    if composed_len > super::prompt_skills::MAX_COMPOSED_PROMPT_BYTES {
+        return Err(format!(
+            "{COMPOSED_CAP_ERROR_PREFIX} {} byte limit ({composed_len} bytes)",
+            super::prompt_skills::MAX_COMPOSED_PROMPT_BYTES
+        ));
+    }
+    Ok(ResolvedField {
+        value: Some(format!("{base}{sections}")),
+        source: base_prompt.source,
+    })
+}
+
+/// Compose with an injectable catalog — the test seam for fixture skills
+/// (mirrors `prompt_skills::compose_skill_sections_from`).
+#[cfg(test)]
+pub(crate) fn compose_final_prompt_from(
+    base_prompt: Option<String>,
+    ids: &[super::types::BuzzSkillId],
+    catalog: &[super::prompt_skills::BuzzPromptSkill],
+) -> Result<Option<String>, String> {
+    let sections = super::prompt_skills::compose_skill_sections_from(catalog, ids)?;
+    let base = base_prompt.unwrap_or_default();
+    let composed_len = base.len() + sections.len();
+    if composed_len > super::prompt_skills::MAX_COMPOSED_PROMPT_BYTES {
+        return Err(format!(
+            "{COMPOSED_CAP_ERROR_PREFIX} {} byte limit ({composed_len} bytes)",
+            super::prompt_skills::MAX_COMPOSED_PROMPT_BYTES
+        ));
+    }
+    Ok(Some(format!("{base}{sections}")))
+}
+
 fn resolve_linked(
+    record: &ManagedAgentRecord,
     definition: &AgentDefinition,
     global: &GlobalAgentConfig,
-) -> EffectiveAgentConfig {
+) -> Result<EffectiveAgentConfig, String> {
     let model = match non_blank(definition.model.as_deref()) {
         Some(m) => ResolvedField {
             value: Some(m.to_owned()),
@@ -97,16 +233,23 @@ fn resolve_linked(
         },
     };
 
-    let system_prompt = ResolvedField {
+    let base_system_prompt = ResolvedField {
         value: non_blank(Some(definition.system_prompt.as_str())).map(str::to_owned),
         source: ConfigSource::Definition,
     };
 
-    EffectiveAgentConfig {
+    let capability_policy =
+        resolve_effective_capability_policy(record, std::slice::from_ref(definition), global);
+    let system_prompt =
+        compose_final_prompt(base_system_prompt.clone(), &capability_policy.policy)?;
+
+    Ok(EffectiveAgentConfig {
         model,
         provider,
         system_prompt,
-    }
+        base_system_prompt,
+        capability_policy: capability_policy.policy,
+    })
 }
 
 /// The API key value the relay-mesh preset wrote before the Jun-11 rename
@@ -188,7 +331,7 @@ fn legacy_record_mesh_model_id(record: &ManagedAgentRecord) -> Option<String> {
 fn resolve_definition_less(
     record: &ManagedAgentRecord,
     global: &GlobalAgentConfig,
-) -> EffectiveAgentConfig {
+) -> Result<EffectiveAgentConfig, String> {
     let model = match non_blank(record.model.as_deref()) {
         Some(m) => ResolvedField {
             value: Some(m.to_owned()),
@@ -211,15 +354,21 @@ fn resolve_definition_less(
         },
     };
 
-    let system_prompt = ResolvedField {
+    let base_system_prompt = ResolvedField {
         value: non_blank(record.system_prompt.as_deref()).map(str::to_owned),
         source: ConfigSource::InstanceLegacy,
     };
+
+    let capability_policy = resolve_effective_capability_policy(record, &[], global);
+    let system_prompt =
+        compose_final_prompt(base_system_prompt.clone(), &capability_policy.policy)?;
 
     let mut config = EffectiveAgentConfig {
         model,
         provider,
         system_prompt,
+        base_system_prompt,
+        capability_policy: capability_policy.policy,
     };
 
     // Legacy mesh compatibility. A record with an explicit `provider` has
@@ -241,7 +390,7 @@ fn resolve_definition_less(
         }
     }
 
-    config
+    Ok(config)
 }
 
 pub fn resolve_effective_config(
@@ -251,13 +400,19 @@ pub fn resolve_effective_config(
 ) -> EffectiveConfigResult {
     match &record.persona_id {
         Some(pid) => match definitions.iter().find(|d| d.id == *pid) {
-            Some(def) => EffectiveConfigResult::Resolved(resolve_linked(def, global)),
+            Some(def) => match resolve_linked(record, def, global) {
+                Ok(config) => EffectiveConfigResult::Resolved(config),
+                Err(error) => EffectiveConfigResult::InvalidPolicy { error },
+            },
             None => EffectiveConfigResult::OrphanedInstance {
                 record_pubkey: record.pubkey.clone(),
                 missing_persona_id: pid.clone(),
             },
         },
-        None => EffectiveConfigResult::Resolved(resolve_definition_less(record, global)),
+        None => match resolve_definition_less(record, global) {
+            Ok(config) => EffectiveConfigResult::Resolved(config),
+            Err(error) => EffectiveConfigResult::InvalidPolicy { error },
+        },
     }
 }
 
@@ -268,8 +423,82 @@ pub fn resolve_effective_model_provider_pair(
 ) -> Option<(Option<String>, Option<String>)> {
     match resolve_effective_config(record, definitions, global) {
         EffectiveConfigResult::Resolved(cfg) => Some((cfg.model.value, cfg.provider.value)),
-        EffectiveConfigResult::OrphanedInstance { .. } => None,
+        EffectiveConfigResult::OrphanedInstance { .. }
+        | EffectiveConfigResult::InvalidPolicy { .. } => None,
     }
+}
+
+/// Save-time guard (SPEC-004): the prospective COMPOSED prompt — the
+/// effective base prompt (live definition prompt for linked instances, the
+/// record's own prompt for legacy ones) plus the resolved policy's skill
+/// sections — must fit the 128 KiB cap on every managed-agent save path,
+/// including edits that touch neither the prompt nor the policy (a stored
+/// `Selected`-skills policy still composes against the new base). Spawn and
+/// deploy compose at resolve time and refuse over-cap prompts with
+/// `InvalidPolicy`; this surfaces the same failure at the save boundary
+/// (plan §07 row 5), using the production resolver so the two can never
+/// drift.
+///
+/// Orphaned linked records pass — spawn/deploy refuse them via
+/// `require_resolved` with the shared orphan error.
+pub fn validate_effective_composed_prompt(
+    record: &ManagedAgentRecord,
+    definitions: &[AgentDefinition],
+    global: &GlobalAgentConfig,
+) -> Result<(), String> {
+    match resolve_effective_config(record, definitions, global) {
+        EffectiveConfigResult::Resolved(_) | EffectiveConfigResult::OrphanedInstance { .. } => {
+            Ok(())
+        }
+        EffectiveConfigResult::InvalidPolicy { error } => Err(error),
+    }
+}
+
+/// Inbound-wire counterpart of [`validate_effective_composed_prompt`]
+/// (round2-general-002, kind:30177 half), called from
+/// `apply_inbound_managed_agent` AFTER the projected override is patched
+/// onto the local record. The override composes against the LOCAL base
+/// prompt (live definition prompt for linked instances, the record's own
+/// for legacy ones), so a cross-client event could otherwise persist an
+/// over-cap override every local save path rejects — wedging spawn/deploy
+/// at resolve time until manual repair.
+///
+/// Tolerance-shaped like the 30175 parse boundary: never reject the event,
+/// never skip the apply (retention dedup would poison the head). Only the
+/// SKILLS sub-group affects composed size, so an over-cap override drops
+/// skills to Inherit; when that leaves an all-default override the record
+/// stores `None` (inherit the definition) — `Some(default)` would silently
+/// mask a non-default definition policy. Gated on the cap error only: an
+/// unknown skill id (hand-edited store) keeps its loud failure.
+pub fn downgrade_over_cap_inbound_override(
+    record: &mut ManagedAgentRecord,
+    definitions: &[AgentDefinition],
+    global: &GlobalAgentConfig,
+) {
+    let Some(policy) = &record.capability_policy_override else {
+        return;
+    };
+    if !matches!(policy.skills, SkillPolicy::Selected { .. }) {
+        return;
+    }
+    let over_cap = match resolve_effective_config(record, definitions, global) {
+        EffectiveConfigResult::InvalidPolicy { error } => {
+            error.starts_with(COMPOSED_CAP_ERROR_PREFIX)
+        }
+        _ => false,
+    };
+    if !over_cap {
+        return;
+    }
+    let Some(mut policy) = record.capability_policy_override.take() else {
+        return;
+    };
+    policy.skills = SkillPolicy::Inherit;
+    record.capability_policy_override = if policy.is_default() {
+        None
+    } else {
+        Some(policy)
+    };
 }
 
 /// The relay-mesh preflight decision for `record`, resolved the same way
@@ -290,7 +519,8 @@ pub fn resolve_effective_relay_mesh_model_id(
 ) -> Option<String> {
     match resolve_effective_config(record, definitions, global) {
         EffectiveConfigResult::Resolved(cfg) => cfg.relay_mesh_model_id(),
-        EffectiveConfigResult::OrphanedInstance { .. } => None,
+        EffectiveConfigResult::OrphanedInstance { .. }
+        | EffectiveConfigResult::InvalidPolicy { .. } => None,
     }
 }
 
@@ -310,9 +540,12 @@ impl EffectiveConfigResult {
             EffectiveConfigResult::OrphanedInstance { .. } => {
                 Err(ORPHANED_INSTANCE_ERROR.to_string())
             }
+            EffectiveConfigResult::InvalidPolicy { error } => Err(error),
         }
     }
 }
 
+#[cfg(test)]
+mod capability_tests;
 #[cfg(test)]
 mod tests;

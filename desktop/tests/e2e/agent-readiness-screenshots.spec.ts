@@ -244,6 +244,8 @@ test.describe("agent readiness gate screenshots", () => {
           install_instructions_url: "https://github.com/block/buzz",
           can_auto_install: false,
           underlying_cli_path: null,
+          // Mirrors the Rust catalog: buzz-agent drives provider selection.
+          provider_selection: true,
         },
         {
           id: "claude",

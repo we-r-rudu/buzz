@@ -606,29 +606,17 @@ mod tests {
     use super::*;
     use crate::managed_agents::{BackendKind, RespondTo};
 
+    /// Goose-shaped fixture for the config-surface tests: the fields the
+    /// surface reads match the real catalog entry, everything else is the
+    /// zero base (deliberately hermetic — catalog edits must not drift these
+    /// assertions).
     fn goose_runtime() -> &'static KnownAcpRuntime {
         &KnownAcpRuntime {
             id: "goose",
             label: "Goose",
             commands: &["goose"],
-            aliases: &[],
-            avatar_url: "",
-            mcp_command: None,
-            mcp_hooks: false,
-            underlying_cli: None,
-            cli_install_commands: &[],
-            cli_install_commands_windows: &[],
-            adapter_install_commands: &[],
-            cli_install_instructions_url: "",
-            adapter_install_instructions_url: "",
-            cli_install_hint: "",
-            adapter_install_hint: "",
-            skill_dir: None,
-            supports_acp_model_switching: false,
             model_env_var: Some("GOOSE_MODEL"),
             provider_env_var: Some("GOOSE_PROVIDER"),
-            provider_locked: false,
-            default_env: &[],
             config_file_path: Some("~/.config/goose/config.yaml"),
             config_file_format: Some("yaml"),
             supports_acp_native_config: true,
@@ -636,8 +624,8 @@ mod tests {
             max_tokens_env_var: Some("GOOSE_MAX_TOKENS"),
             context_limit_env_var: Some("GOOSE_CONTEXT_LIMIT"),
             required_normalized_fields: &["model", "provider"],
-            login_hint: None,
-            auth_probe_args: None,
+            provider_selection: true,
+            ..crate::managed_agents::EMPTY_RUNTIME
         }
     }
 
@@ -690,6 +678,8 @@ mod tests {
             definition_respond_to: None,
             definition_respond_to_allowlist: Vec::new(),
             definition_parallelism: None,
+            definition_capability_policy: Default::default(),
+            capability_policy_override: None,
             relay_mesh: None,
             agent_command_override: None,
             persona_source_version: None,
@@ -715,6 +705,7 @@ mod tests {
             respond_to: None,
             respond_to_allowlist: Vec::new(),
             parallelism: None,
+            capability_policy: Default::default(),
             created_at: "".to_string(),
             updated_at: "".to_string(),
         }

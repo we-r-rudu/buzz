@@ -1,7 +1,14 @@
 //! Tests for inbound persona/team/managed-agent reconciliation.
 //! Extracted from the parent module to keep it under the file-size cap.
 
+use super::inbound::{
+    apply_inbound_managed_agent, apply_inbound_persona, apply_inbound_team,
+    parse_deletion_coordinate, parse_verified_inbound_event,
+};
 use super::*;
+use crate::managed_agents::persona_events::persona_d_tag;
+use crate::managed_agents::team_events::TeamEventContent;
+use crate::managed_agents::TeamRecord;
 use std::collections::BTreeMap;
 
 const UUID: &str = "11111111-2222-3333-4444-555555555555";
@@ -26,6 +33,7 @@ fn local_in_app() -> AgentDefinition {
         respond_to: None,
         respond_to_allowlist: Vec::new(),
         parallelism: None,
+        capability_policy: Default::default(),
         created_at: "2025-01-01T00:00:00Z".to_string(),
         updated_at: "2025-01-01T00:00:00Z".to_string(),
     }
@@ -51,6 +59,7 @@ fn inbound_for(d_tag: &str, display_name: &str) -> AgentDefinition {
         respond_to: None,
         respond_to_allowlist: Vec::new(),
         parallelism: None,
+        capability_policy: Default::default(),
         created_at: "2025-06-01T00:00:00Z".to_string(),
         updated_at: "2025-06-01T00:00:00Z".to_string(),
     }
@@ -101,6 +110,37 @@ fn inbound_quad_edit_applies_to_existing_matched_record() {
     apply_inbound_persona(&mut personas, inbound_for(UUID, "Remote"));
     assert_eq!(personas[0].respond_to, None);
     assert_eq!(personas[0].parallelism, None);
+}
+
+#[test]
+fn inbound_capability_policy_edit_applies_to_existing_matched_record() {
+    // SPEC-003: a kind:30175 policy edit synced for an already-known persona
+    // must land on the MATCH branch like the behavioral quad — otherwise
+    // linked instances keep resolving the old policy locally, and a later
+    // local edit-and-republish erases the remote policy fleet-wide (the
+    // silent-dropping class §1.3's publish decision forbids).
+    use crate::managed_agents::{AgentCapabilityPolicy, SkillPolicy, ToolCapabilityId, ToolPolicy};
+
+    let mut personas = vec![local_in_app()];
+
+    let mut inbound = inbound_for(UUID, "Remote");
+    inbound.capability_policy = AgentCapabilityPolicy {
+        tools: ToolPolicy::Selected {
+            selected: vec![ToolCapabilityId::FilesRead],
+        },
+        skills: SkillPolicy::Selected {
+            selected: vec!["buzz-cli".to_string()],
+        },
+    };
+    apply_inbound_persona(&mut personas, inbound.clone());
+
+    assert_eq!(personas.len(), 1, "no duplicate row");
+    assert_eq!(personas[0].capability_policy, inbound.capability_policy);
+
+    // Clearing the policy back to defaults applies too (drift badge clears).
+    inbound.capability_policy = AgentCapabilityPolicy::default();
+    apply_inbound_persona(&mut personas, inbound);
+    assert!(personas[0].capability_policy.is_default());
 }
 
 #[test]
@@ -208,6 +248,8 @@ fn local_agent() -> ManagedAgentRecord {
         definition_respond_to: None,
         definition_respond_to_allowlist: Vec::new(),
         definition_parallelism: None,
+        definition_capability_policy: Default::default(),
+        capability_policy_override: None,
         relay_mesh: None,
     }
 }
@@ -256,7 +298,7 @@ fn inbound_managed_agent_drops_injected_secrets_and_harness() {
     let content =
         crate::managed_agents::agent_events::managed_agent_content_from_event(&event).unwrap();
     let mut agents = vec![local_agent()];
-    apply_inbound_managed_agent(&mut agents, AGENT_PUBKEY, content);
+    apply_inbound_managed_agent(&mut agents, AGENT_PUBKEY, content, &[], &Default::default());
 
     let a = &agents[0];
     // Secrets / harness / runtime — every one preserved from the local record.
@@ -347,7 +389,7 @@ fn inbound_definition_less_agent_applies_quad() {
     let content =
         crate::managed_agents::agent_events::managed_agent_content_from_event(&event).unwrap();
     let mut agents = vec![local_agent()];
-    apply_inbound_managed_agent(&mut agents, AGENT_PUBKEY, content);
+    apply_inbound_managed_agent(&mut agents, AGENT_PUBKEY, content, &[], &Default::default());
 
     let a = &agents[0];
     assert_eq!(a.persona_id, None);
@@ -361,13 +403,74 @@ fn inbound_definition_less_agent_applies_quad() {
     );
 }
 
+/// Instance capability override syncs like respond_to/parallelism: a `Some`
+/// on the wire patches the local record; an absent key clears to inherit
+/// (the documented mixed-version caveat — an old client re-publishing after
+/// a local edit drops the field, identical to the behavioral-quad activation).
+#[test]
+fn inbound_managed_agent_patches_capability_override() {
+    use nostr::{EventBuilder, Keys, Kind, Tag};
+
+    let content = serde_json::json!({
+        "name": "Remote Agent",
+        "parallelism": 1,
+        "respond_to": "anyone",
+        "capability_policy_override": {
+            "tools": { "mode": "selected", "selected": ["files.read"] },
+        },
+    });
+    let keys = Keys::generate();
+    let event = EventBuilder::new(Kind::Custom(30177), content.to_string())
+        .tags(vec![Tag::parse(["d", AGENT_PUBKEY]).unwrap()])
+        .sign_with_keys(&keys)
+        .unwrap();
+
+    let content =
+        crate::managed_agents::agent_events::managed_agent_content_from_event(&event).unwrap();
+    let mut agents = vec![local_agent()];
+    apply_inbound_managed_agent(&mut agents, AGENT_PUBKEY, content, &[], &Default::default());
+
+    let expected: crate::managed_agents::AgentCapabilityPolicy =
+        serde_json::from_value(serde_json::json!({
+            "tools": { "mode": "selected", "selected": ["files.read"] },
+        }))
+        .unwrap();
+    assert_eq!(
+        agents[0].capability_policy_override,
+        Some(expected),
+        "a projected override must patch onto the local record"
+    );
+
+    // Absent on the wire clears to inherit — instance-level state, patched
+    // unconditionally like respond_to/parallelism.
+    let content = serde_json::json!({
+        "name": "Remote Agent",
+        "parallelism": 1,
+        "respond_to": "anyone",
+    });
+    let event = EventBuilder::new(Kind::Custom(30177), content.to_string())
+        .tags(vec![Tag::parse(["d", AGENT_PUBKEY]).unwrap()])
+        .sign_with_keys(&keys)
+        .unwrap();
+    let content =
+        crate::managed_agents::agent_events::managed_agent_content_from_event(&event).unwrap();
+    apply_inbound_managed_agent(&mut agents, AGENT_PUBKEY, content, &[], &Default::default());
+    assert_eq!(agents[0].capability_policy_override, None);
+}
+
 #[test]
 fn inbound_managed_agent_no_match_is_noop() {
     let event = foreign_agent_event_with_secrets("someotheragentpubkey");
     let content =
         crate::managed_agents::agent_events::managed_agent_content_from_event(&event).unwrap();
     let mut agents = vec![local_agent()];
-    apply_inbound_managed_agent(&mut agents, "someotheragentpubkey", content);
+    apply_inbound_managed_agent(
+        &mut agents,
+        "someotheragentpubkey",
+        content,
+        &[],
+        &Default::default(),
+    );
 
     // No agent minted from a relay event — it would have no secret key.
     assert_eq!(agents.len(), 1);
@@ -666,4 +769,207 @@ fn inbound_gate_accepts_validly_signed_event() {
         .unwrap();
     let parsed = parse_verified_inbound_event(&event.as_json()).unwrap();
     assert_eq!(parsed.pubkey, keys.public_key());
+}
+
+// ── round2-general-002: the 128 KiB composed-prompt cap at the inbound ────
+// wire boundary (30175 + 30177), tolerance-shaped: never reject the event,
+// never poison retention; drop only the skills sub-group when the
+// composition would exceed the cap.
+
+/// 125 KiB base + the bundled buzz-cli section (~10.7 KB) exceeds the
+/// 128 KiB composed cap; 1 KiB + the same section fits comfortably.
+const OVER_CAP_BASE_BYTES: usize = 125 * 1024;
+
+fn persona_event_with(system_prompt: &str, policy: serde_json::Value) -> nostr::Event {
+    use nostr::{EventBuilder, JsonUtil, Keys, Kind, Tag};
+    let content = serde_json::json!({
+        "display_name": "Remote",
+        "system_prompt": system_prompt,
+        "capability_policy": policy,
+    });
+    let keys = Keys::generate();
+    let event = EventBuilder::new(Kind::Custom(30175), content.to_string())
+        .tags(vec![Tag::parse(["d", "inbound-cap-persona"]).unwrap()])
+        .sign_with_keys(&keys)
+        .unwrap();
+    nostr::Event::from_json(event.as_json()).unwrap()
+}
+
+fn agent_event_with_override(override_policy: serde_json::Value) -> nostr::Event {
+    use nostr::{EventBuilder, JsonUtil, Keys, Kind, Tag};
+    let content = serde_json::json!({
+        "name": "Remote Agent",
+        "persona_id": "persona-local",
+        "parallelism": 1,
+        "respond_to": "anyone",
+        "capability_policy_override": override_policy,
+    });
+    let keys = Keys::generate();
+    let event = EventBuilder::new(Kind::Custom(30177), content.to_string())
+        .tags(vec![Tag::parse(["d", AGENT_PUBKEY]).unwrap()])
+        .sign_with_keys(&keys)
+        .unwrap();
+    nostr::Event::from_json(event.as_json()).unwrap()
+}
+
+/// A definition with a `prompt_bytes`-sized prompt, linked by
+/// [`local_agent`] (`persona_id: "persona-local"`).
+fn big_prompt_definition(prompt_bytes: usize) -> AgentDefinition {
+    AgentDefinition {
+        id: "persona-local".to_string(),
+        system_prompt: "x".repeat(prompt_bytes),
+        ..local_in_app()
+    }
+}
+
+#[test]
+fn inbound_over_cap_persona_event_drops_skills_keeps_tools_and_prompt() {
+    use crate::managed_agents::{SkillPolicy, ToolCapabilityId, ToolPolicy};
+    let event = persona_event_with(
+        &"x".repeat(OVER_CAP_BASE_BYTES),
+        serde_json::json!({
+            "tools": { "mode": "selected", "selected": ["files.read"] },
+            "skills": { "mode": "selected", "selected": ["buzz-cli"] },
+        }),
+    );
+    let parsed = crate::managed_agents::persona_events::persona_from_event(&event).unwrap();
+    // Only the skills sub-group downgrades to Inherit — the tools policy
+    // bytes (mixed-version tolerance) and the rest of the event survive.
+    assert_eq!(parsed.capability_policy.skills, SkillPolicy::Inherit);
+    assert_eq!(
+        parsed.capability_policy.tools,
+        ToolPolicy::Selected {
+            selected: vec![ToolCapabilityId::FilesRead],
+        }
+    );
+    assert_eq!(parsed.system_prompt.len(), OVER_CAP_BASE_BYTES);
+    assert_eq!(parsed.display_name, "Remote");
+}
+
+#[test]
+fn inbound_under_cap_persona_event_applies_byte_identical_policy() {
+    use crate::managed_agents::{SkillPolicy, ToolCapabilityId, ToolPolicy};
+    let event = persona_event_with(
+        "short prompt",
+        serde_json::json!({
+            "tools": { "mode": "selected", "selected": ["files.read"] },
+            "skills": { "mode": "selected", "selected": ["buzz-cli"] },
+        }),
+    );
+    let parsed = crate::managed_agents::persona_events::persona_from_event(&event).unwrap();
+    assert_eq!(
+        parsed.capability_policy.skills,
+        SkillPolicy::Selected {
+            selected: vec!["buzz-cli".to_string()],
+        }
+    );
+    assert_eq!(
+        parsed.capability_policy.tools,
+        ToolPolicy::Selected {
+            selected: vec![ToolCapabilityId::FilesRead],
+        }
+    );
+}
+
+#[test]
+fn inbound_bare_over_cap_prompt_without_skills_applies_as_is() {
+    use crate::managed_agents::SkillPolicy;
+    // A prompt that is over the cap ON ITS OWN (no skill selection
+    // contributes sections) applies untruncated — the same loud
+    // InvalidPolicy-at-resolve failure mode as a hand-edited store, never a
+    // silent truncation or rejection.
+    let event = persona_event_with(
+        &"x".repeat(140 * 1024),
+        serde_json::json!({ "skills": { "mode": "none" } }),
+    );
+    let parsed = crate::managed_agents::persona_events::persona_from_event(&event).unwrap();
+    assert_eq!(parsed.system_prompt.len(), 140 * 1024);
+    assert_eq!(parsed.capability_policy.skills, SkillPolicy::None);
+}
+
+#[test]
+fn inbound_over_cap_override_downgrades_skills_keeps_tools() {
+    use crate::managed_agents::{SkillPolicy, ToolCapabilityId, ToolPolicy};
+    let personas = vec![big_prompt_definition(OVER_CAP_BASE_BYTES)];
+    let event = agent_event_with_override(serde_json::json!({
+        "tools": { "mode": "selected", "selected": ["files.read"] },
+        "skills": { "mode": "selected", "selected": ["buzz-cli"] },
+    }));
+    let content =
+        crate::managed_agents::agent_events::managed_agent_content_from_event(&event).unwrap();
+    let mut agents = vec![local_agent()];
+    apply_inbound_managed_agent(
+        &mut agents,
+        AGENT_PUBKEY,
+        content,
+        &personas,
+        &Default::default(),
+    );
+
+    let applied = agents[0]
+        .capability_policy_override
+        .clone()
+        .expect("the tools sub-group survives the downgrade");
+    assert_eq!(applied.skills, SkillPolicy::Inherit);
+    assert_eq!(
+        applied.tools,
+        ToolPolicy::Selected {
+            selected: vec![ToolCapabilityId::FilesRead],
+        }
+    );
+}
+
+#[test]
+fn inbound_over_cap_skills_only_override_clears_to_inherit_not_default() {
+    // An all-default-after-downgrade override stores None (inherit the
+    // definition) — Some(default) would silently mask a non-default
+    // definition policy behind an explicit-looking override.
+    let personas = vec![big_prompt_definition(OVER_CAP_BASE_BYTES)];
+    let event = agent_event_with_override(serde_json::json!({
+        "skills": { "mode": "selected", "selected": ["buzz-cli"] },
+    }));
+    let content =
+        crate::managed_agents::agent_events::managed_agent_content_from_event(&event).unwrap();
+    let mut agents = vec![local_agent()];
+    apply_inbound_managed_agent(
+        &mut agents,
+        AGENT_PUBKEY,
+        content,
+        &personas,
+        &Default::default(),
+    );
+
+    assert_eq!(agents[0].capability_policy_override, None);
+}
+
+#[test]
+fn inbound_under_cap_override_applies_untouched() {
+    use crate::managed_agents::{AgentCapabilityPolicy, SkillPolicy, ToolCapabilityId, ToolPolicy};
+    let personas = vec![big_prompt_definition(1024)];
+    let event = agent_event_with_override(serde_json::json!({
+        "tools": { "mode": "selected", "selected": ["files.read"] },
+        "skills": { "mode": "selected", "selected": ["buzz-cli"] },
+    }));
+    let content =
+        crate::managed_agents::agent_events::managed_agent_content_from_event(&event).unwrap();
+    let mut agents = vec![local_agent()];
+    apply_inbound_managed_agent(
+        &mut agents,
+        AGENT_PUBKEY,
+        content,
+        &personas,
+        &Default::default(),
+    );
+
+    assert_eq!(
+        agents[0].capability_policy_override,
+        Some(AgentCapabilityPolicy {
+            tools: ToolPolicy::Selected {
+                selected: vec![ToolCapabilityId::FilesRead],
+            },
+            skills: SkillPolicy::Selected {
+                selected: vec!["buzz-cli".to_string()],
+            },
+        })
+    );
 }

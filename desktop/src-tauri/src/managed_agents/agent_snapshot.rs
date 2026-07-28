@@ -531,6 +531,8 @@ mod tests {
             definition_respond_to: Some("allowlist".to_string()),
             definition_respond_to_allowlist: vec!["abc123def".to_string()],
             definition_parallelism: Some(4),
+            definition_capability_policy: Default::default(),
+            capability_policy_override: None,
             relay_mesh: None,
         }
     }

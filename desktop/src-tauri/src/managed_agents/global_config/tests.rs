@@ -345,6 +345,8 @@ fn bare_record() -> ManagedAgentRecord {
         is_active: true,
         source_team: None,
         source_team_persona_slug: None,
+        definition_capability_policy: Default::default(),
+        capability_policy_override: None,
         relay_mesh: None,
         auto_restart_on_config_change: false,
         definition_respond_to: None,
@@ -371,6 +373,7 @@ fn persona(id: &str, model: Option<&str>, provider: Option<&str>) -> AgentDefini
         respond_to: None,
         respond_to_allowlist: vec![],
         parallelism: None,
+        capability_policy: Default::default(),
         created_at: "".to_string(),
         updated_at: "".to_string(),
     }
@@ -630,6 +633,7 @@ fn record_runtime_wins_over_persona_runtime_for_command_resolution() {
         respond_to: None,
         respond_to_allowlist: vec![],
         parallelism: None,
+        capability_policy: Default::default(),
         created_at: "".to_string(),
         updated_at: "".to_string(),
     };

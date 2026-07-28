@@ -1,7 +1,7 @@
 use super::*;
 use std::collections::BTreeMap;
 
-fn definition(
+pub(super) fn definition(
     id: &str,
     model: Option<&str>,
     provider: Option<&str>,
@@ -24,12 +24,13 @@ fn definition(
         respond_to: None,
         respond_to_allowlist: vec![],
         parallelism: None,
+        capability_policy: Default::default(),
         created_at: "".to_string(),
         updated_at: "".to_string(),
     }
 }
 
-fn record(
+pub(super) fn record(
     persona_id: Option<&str>,
     model: Option<&str>,
     provider: Option<&str>,
@@ -83,6 +84,8 @@ fn record(
         is_active: true,
         source_team: None,
         source_team_persona_slug: None,
+        definition_capability_policy: Default::default(),
+        capability_policy_override: None,
         relay_mesh: None,
         auto_restart_on_config_change: false,
         definition_respond_to: None,
@@ -91,7 +94,7 @@ fn record(
     }
 }
 
-fn global(model: Option<&str>, provider: Option<&str>) -> GlobalAgentConfig {
+pub(super) fn global(model: Option<&str>, provider: Option<&str>) -> GlobalAgentConfig {
     GlobalAgentConfig {
         model: model.map(str::to_string),
         provider: provider.map(str::to_string),
@@ -745,6 +748,7 @@ fn legacy_record_falls_back_to_typed_marker_without_provider() {
         EffectiveConfigResult::OrphanedInstance { .. } => {
             panic!("definition-less is never orphaned")
         }
+        EffectiveConfigResult::InvalidPolicy { .. } => panic!("no policy in fixture"),
     };
 
     assert_eq!(cfg.provider.value.as_deref(), Some(RELAY_MESH_PROVIDER_ID));
@@ -797,6 +801,7 @@ fn definition_less_explicit_provider_wins_over_stale_legacy_mesh_bytes() {
         EffectiveConfigResult::OrphanedInstance { .. } => {
             panic!("definition-less is never orphaned")
         }
+        EffectiveConfigResult::InvalidPolicy { .. } => panic!("no policy in fixture"),
     };
 
     assert_eq!(cfg.provider.value.as_deref(), Some("anthropic"));
@@ -839,6 +844,7 @@ fn linked_record_ignores_legacy_mesh_marker_and_env() {
     let cfg = match resolve_effective_config(&rec, &defs, &global(None, None)) {
         EffectiveConfigResult::Resolved(cfg) => cfg,
         EffectiveConfigResult::OrphanedInstance { .. } => panic!("definition exists"),
+        EffectiveConfigResult::InvalidPolicy { .. } => panic!("no policy in fixture"),
     };
 
     assert_eq!(cfg.provider.value.as_deref(), Some("anthropic"));
@@ -864,6 +870,7 @@ fn linked_record_with_legacy_bytes_inherits_global_not_mesh() {
     let cfg = match resolve_effective_config(&rec, &defs, &global(Some("gpt-5"), Some("openai"))) {
         EffectiveConfigResult::Resolved(cfg) => cfg,
         EffectiveConfigResult::OrphanedInstance { .. } => panic!("definition exists"),
+        EffectiveConfigResult::InvalidPolicy { .. } => panic!("no policy in fixture"),
     };
 
     assert_eq!(cfg.provider.value.as_deref(), Some("openai"));

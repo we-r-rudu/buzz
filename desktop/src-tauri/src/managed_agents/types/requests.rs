@@ -6,8 +6,9 @@ use std::collections::BTreeMap;
 use serde::Deserialize;
 
 use super::{
-    default_start_on_app_launch, validate_respond_to_allowlist, AgentDefinition, BackendKind,
-    RelayMeshConfig, RespondTo,
+    default_start_on_app_launch, normalize_capability_policy, validate_capability_policy,
+    validate_respond_to_allowlist, AgentCapabilityPolicy, AgentDefinition, BackendKind,
+    RelayMeshConfig, RespondTo, SkillPolicy,
 };
 
 /// The NIP-AP behavioral group as one grouped request field.
@@ -71,6 +72,78 @@ pub fn apply_persona_behavior(
     Ok(())
 }
 
+/// The composed-prompt cap guard (SPEC-004): a prospective base prompt plus
+/// the policy's skill sections must fit the 128 KiB composed cap on EVERY
+/// save path — including prompt-only edits where the policy request field is
+/// absent (the stored `Selected`-skills policy still composes against the
+/// new prompt). Compose re-checks at resolve time as defense in depth; this
+/// surfaces the failure at the save boundary (plan §07 row 5).
+pub fn validate_persona_composed_prompt(
+    system_prompt: &str,
+    policy: &AgentCapabilityPolicy,
+) -> Result<(), String> {
+    let SkillPolicy::Selected { selected } = &policy.skills else {
+        return Ok(());
+    };
+    let sections = crate::managed_agents::prompt_skills::compose_skill_sections(selected)?;
+    let composed = system_prompt.len() + sections.len();
+    if composed > crate::managed_agents::prompt_skills::MAX_COMPOSED_PROMPT_BYTES {
+        return Err(format!(
+            "system prompt plus selected skills exceeds the {} byte prompt limit ({composed} bytes)",
+            crate::managed_agents::prompt_skills::MAX_COMPOSED_PROMPT_BYTES
+        ));
+    }
+    Ok(())
+}
+
+/// Validate a capability policy group and apply it onto a persona record.
+///
+/// Same absent-vs-present group contract as [`apply_persona_behavior`]:
+/// `None` leaves the stored policy untouched (legacy callers don't send it);
+/// `Some` validates (`validate_capability_policy` — non-empty selections,
+/// known skill ids, byte caps), normalizes (dedupe preserving order), checks
+/// the composed final prompt fits the 128 KiB cap, and replaces the group as
+/// a unit. Team personas (`source_team`) are non-editable: the policy is
+/// locked exactly like system_prompt/model there.
+pub fn apply_persona_capability_policy(
+    record: &mut AgentDefinition,
+    capability_policy: Option<AgentCapabilityPolicy>,
+) -> Result<(), String> {
+    let Some(mut policy) = capability_policy else {
+        return Ok(());
+    };
+    if record.source_team.is_some() {
+        return Err("team personas are non-editable: capability policy is locked".to_string());
+    }
+    validate_capability_policy(&policy)?;
+    normalize_capability_policy(&mut policy);
+    validate_persona_composed_prompt(&record.system_prompt, &policy)?;
+    record.capability_policy = policy;
+    Ok(())
+}
+
+/// [`apply_persona_capability_policy`] plus the save-time runtime
+/// compatibility check (HC-003): the applied policy must be honor-able by
+/// the persona's prospective runtime. Create/update persona call sites share
+/// this single sequence so the two steps can never drift apart; the spawn
+/// descriptor's typed Err remains the backstop.
+pub fn apply_persona_capability_policy_checked(
+    record: &mut AgentDefinition,
+    capability_policy: Option<AgentCapabilityPolicy>,
+) -> Result<(), String> {
+    apply_persona_capability_policy(record, capability_policy)?;
+    // SPEC-004: the composed-prompt cap also guards saves where the policy
+    // field is ABSENT — a prompt-only edit still composes the stored
+    // `Selected`-skills policy against the new prompt, and an over-cap save
+    // would otherwise surface later as an InvalidPolicy spawn/deploy refusal
+    // (failure at the wrong boundary).
+    validate_persona_composed_prompt(&record.system_prompt, &record.capability_policy)?;
+    crate::managed_agents::capability_compiler::validate_policy_against_runtime(
+        &record.capability_policy,
+        record.runtime.as_deref(),
+    )
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CreatePersonaRequest {
@@ -91,6 +164,9 @@ pub struct CreatePersonaRequest {
     /// NIP-AP behavioral group. Absent = behavior group stays unset.
     #[serde(default)]
     pub behavior: Option<PersonaBehaviorRequest>,
+    /// Capability policy group. Absent = policy stays unset (harness defaults).
+    #[serde(default)]
+    pub capability_policy: Option<AgentCapabilityPolicy>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -121,6 +197,10 @@ pub struct UpdatePersonaRequest {
     /// present = validate and replace the fields as a unit.
     #[serde(default)]
     pub behavior: Option<PersonaBehaviorRequest>,
+    /// Capability policy group. Same contract: absent = don't touch; present =
+    /// validate and replace as a unit.
+    #[serde(default)]
+    pub capability_policy: Option<AgentCapabilityPolicy>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -184,6 +264,11 @@ pub struct CreateManagedAgentRequest {
     pub respond_to_allowlist: Vec<String>,
     #[serde(default)]
     pub relay_mesh: Option<RelayMeshConfig>,
+    /// Capability policy for this agent at mint. `None` = inherit the linked
+    /// definition's policy (or harness defaults when definition-less);
+    /// `Some` = validated and stored as the instance override.
+    #[serde(default)]
+    pub capability_policy: Option<AgentCapabilityPolicy>,
 }
 
 /// Patch request for updating a managed agent's mutable fields.
@@ -249,11 +334,18 @@ pub struct UpdateManagedAgentRequest {
     /// normalized server-side).
     #[serde(default)]
     pub respond_to_allowlist: Option<Vec<String>>,
+    /// Tri-state capability policy override: absent = don't touch, null =
+    /// clear to inherit the definition (or defaults), value = validate and
+    /// set as the instance override.
+    #[serde(default, deserialize_with = "crate::util::double_option")]
+    pub capability_policy_override: Option<Option<AgentCapabilityPolicy>>,
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use crate::managed_agents::{SkillPolicy, ToolCapabilityId, ToolPolicy};
 
     fn record_with_quad() -> AgentDefinition {
         let mut record = record_without_quad();
@@ -281,9 +373,183 @@ mod tests {
             respond_to: None,
             respond_to_allowlist: Vec::new(),
             parallelism: None,
+            capability_policy: AgentCapabilityPolicy::default(),
             created_at: "2026-01-01T00:00:00Z".to_string(),
             updated_at: "2026-01-01T00:00:00Z".to_string(),
         }
+    }
+
+    fn record_with_policy() -> AgentDefinition {
+        let mut record = record_without_quad();
+        record.capability_policy = AgentCapabilityPolicy {
+            tools: ToolPolicy::Selected {
+                selected: vec![ToolCapabilityId::FilesRead],
+            },
+            skills: SkillPolicy::None,
+        };
+        record
+    }
+
+    /// Anchor row mirroring `absent_behavior_leaves_stored_quad_untouched`:
+    /// an absent capability policy group must leave the stored group
+    /// untouched — legacy callers send no policy field and must not wipe it.
+    #[test]
+    fn absent_capability_policy_leaves_stored_policy_untouched() {
+        let mut record = record_with_policy();
+        apply_persona_capability_policy(&mut record, None).unwrap();
+        assert_eq!(
+            record.capability_policy.tools,
+            ToolPolicy::Selected {
+                selected: vec![ToolCapabilityId::FilesRead]
+            }
+        );
+        assert_eq!(record.capability_policy.skills, SkillPolicy::None);
+    }
+
+    #[test]
+    fn present_capability_policy_replaces_as_a_unit() {
+        let mut record = record_with_policy();
+        apply_persona_capability_policy(
+            &mut record,
+            Some(AgentCapabilityPolicy {
+                tools: ToolPolicy::None,
+                skills: SkillPolicy::Selected {
+                    selected: vec!["buzz-cli".to_string()],
+                },
+            }),
+        )
+        .unwrap();
+        assert_eq!(record.capability_policy.tools, ToolPolicy::None);
+        assert_eq!(
+            record.capability_policy.skills,
+            SkillPolicy::Selected {
+                selected: vec!["buzz-cli".to_string()]
+            }
+        );
+    }
+
+    #[test]
+    fn empty_selected_policy_is_rejected() {
+        let mut record = record_without_quad();
+        let err = apply_persona_capability_policy(
+            &mut record,
+            Some(AgentCapabilityPolicy {
+                tools: ToolPolicy::Selected { selected: vec![] },
+                skills: SkillPolicy::default(),
+            }),
+        )
+        .unwrap_err();
+        assert!(err.contains("at least one"), "{err}");
+        // Rejection must not half-apply: the record stays untouched.
+        assert!(record.capability_policy.is_default());
+
+        let err = apply_persona_capability_policy(
+            &mut record,
+            Some(AgentCapabilityPolicy {
+                tools: ToolPolicy::default(),
+                skills: SkillPolicy::Selected { selected: vec![] },
+            }),
+        )
+        .unwrap_err();
+        assert!(err.contains("at least one"), "{err}");
+    }
+
+    #[test]
+    fn unknown_skill_id_is_rejected_by_name() {
+        let mut record = record_without_quad();
+        let err = apply_persona_capability_policy(
+            &mut record,
+            Some(AgentCapabilityPolicy {
+                tools: ToolPolicy::default(),
+                skills: SkillPolicy::Selected {
+                    selected: vec!["not-a-skill".to_string()],
+                },
+            }),
+        )
+        .unwrap_err();
+        assert!(err.contains("not-a-skill"), "{err}");
+    }
+
+    #[test]
+    fn selected_ids_are_deduped_preserving_order() {
+        let mut record = record_without_quad();
+        apply_persona_capability_policy(
+            &mut record,
+            Some(AgentCapabilityPolicy {
+                tools: ToolPolicy::Selected {
+                    selected: vec![
+                        ToolCapabilityId::FilesWrite,
+                        ToolCapabilityId::FilesRead,
+                        ToolCapabilityId::FilesWrite,
+                    ],
+                },
+                skills: SkillPolicy::default(),
+            }),
+        )
+        .unwrap();
+        assert_eq!(
+            record.capability_policy.tools,
+            ToolPolicy::Selected {
+                selected: vec![ToolCapabilityId::FilesWrite, ToolCapabilityId::FilesRead]
+            }
+        );
+    }
+
+    #[test]
+    fn team_persona_policy_is_locked() {
+        let mut record = record_with_policy();
+        record.source_team = Some("team-1".to_string());
+
+        let err =
+            apply_persona_capability_policy(&mut record, Some(AgentCapabilityPolicy::default()))
+                .unwrap_err();
+        assert!(err.contains("non-editable"), "{err}");
+    }
+
+    /// SPEC-004: the 128 KiB composed-prompt cap fires on EVERY persona save
+    /// — including a prompt-only edit where the policy request field is
+    /// absent but the stored `Selected`-skills policy still composes against
+    /// the new prompt. Without it the save succeeds and spawn/deploy refuse
+    /// later with InvalidPolicy (failure at the wrong boundary, §5/§07 row 5).
+    #[test]
+    fn prompt_only_edit_over_the_composed_cap_is_rejected() {
+        use crate::managed_agents::prompt_skills::MAX_COMPOSED_PROMPT_BYTES;
+
+        let mut record = record_without_quad();
+        // Store a Selected-skills policy while the prompt is small.
+        apply_persona_capability_policy_checked(
+            &mut record,
+            Some(AgentCapabilityPolicy {
+                skills: SkillPolicy::Selected {
+                    selected: vec!["buzz-cli".to_string()],
+                },
+                ..Default::default()
+            }),
+        )
+        .unwrap();
+
+        // Prompt-only save (policy field absent) that pushes the composition
+        // over the cap → rejected at the save boundary.
+        record.system_prompt = "x".repeat(MAX_COMPOSED_PROMPT_BYTES);
+        let err = apply_persona_capability_policy_checked(&mut record, None).unwrap_err();
+        assert!(err.contains("prompt limit"), "{err}");
+
+        // A prompt that fits saves cleanly with the stored policy untouched.
+        record.system_prompt = "short".to_string();
+        apply_persona_capability_policy_checked(&mut record, None).unwrap();
+        assert_eq!(
+            record.capability_policy.skills,
+            SkillPolicy::Selected {
+                selected: vec!["buzz-cli".to_string()]
+            }
+        );
+
+        // Same check through the present-policy path (prompt grew first,
+        // then the group is re-submitted).
+        record.system_prompt = "x".repeat(MAX_COMPOSED_PROMPT_BYTES);
+        let stored = record.capability_policy.clone();
+        let err = apply_persona_capability_policy_checked(&mut record, Some(stored)).unwrap_err();
+        assert!(err.contains("prompt limit"), "{err}");
     }
 
     /// The anchor regression row: an absent behavior group must leave a

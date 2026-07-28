@@ -95,9 +95,20 @@ pub(crate) struct EffectiveHarnessDescriptor {
     /// The raw effective command string (e.g. `"buzz-agent"`, `"my-acp-agent"`).
     /// Used for `known_acp_runtime` lookup and hashing.
     pub command: String,
-    /// Normalized effective args.  Instance args win when non-empty; otherwise
-    /// the harness definition's args apply.
+    /// The args to actually spawn with: `base_args` plus any compiled
+    /// capability-policy flags spliced ahead (Leading) by
+    /// `compile_capability_policy`. Equals `base_args` whenever no verified
+    /// transport compiles flags (always true in v1 — HC-001).
     pub args: Vec<String>,
+    /// The PRE-compile user argument vector (instance args when non-empty,
+    /// else the harness definition's args, normalized). The summary's
+    /// editable `agent_args` MUST come from here — never from `args`: seeding
+    /// the Advanced editor from the compiled vector would persist flattened
+    /// capability tokens (`--tools=read` + `grep`) on the next unrelated arg
+    /// edit, tripping the raw-flag conflict guard at the following spawn
+    /// (SPEC-001). Spawn/hash/deploy consume `args`; the editor round-trips
+    /// `base_args`.
+    pub base_args: Vec<String>,
     /// The full layered process env: baked floor → runtime metadata → definition
     /// env → global → persona → agent.
     pub env: BTreeMap<String, String>,
@@ -149,7 +160,7 @@ pub(crate) fn resolve_effective_harness_descriptor(
     };
 
     // Args: explicit non-empty instance args win; otherwise use definition args.
-    let args = {
+    let base_args = {
         let record_args = record.agent_args.clone();
         let instance_has_args = record_args.iter().any(|a| !a.trim().is_empty());
         if instance_has_args {
@@ -161,6 +172,34 @@ pub(crate) fn resolve_effective_harness_descriptor(
         }
     };
 
+    // Capability policy: compile the resolved effective policy into harness
+    // flags spliced ahead of the base args (Leading). Err (unsupported
+    // capability, raw-flag conflict) propagates like the dangling-harness
+    // error: spawn refuses before side effects; hash/summary fall back
+    // exactly as they do for DANGLING_HARNESS_ID. A default policy compiles
+    // to the base args unchanged, so pre-feature records are byte-identical.
+    //
+    // The transport resolves by runtime IDENTITY (SPEC-R2-002), not the
+    // resolved command: a preset/custom harness id maps to the unmapped arm
+    // even when its command collides with a builtin, so the §11.3 rejection
+    // cannot be bypassed by a colliding command. Command-based
+    // `runtime_meta` above stays authoritative for env/mcp/args metadata —
+    // pre-existing intended behavior for command-colliding customs.
+    let args = {
+        let resolved_policy =
+            super::effective_config::resolve_effective_capability_policy(record, personas, global);
+        let capability_runtime = super::capability_compiler::capability_transport_runtime(
+            record,
+            personas,
+            &effective_command,
+        );
+        super::capability_compiler::compile_capability_policy(
+            capability_runtime,
+            &resolved_policy.policy,
+            base_args.clone(),
+        )?
+    };
+
     // Env: full layered resolution (same as resolve_effective_agent_env).
     // Pass harness_def directly to avoid a second lookup.
     let effective_env =
@@ -169,6 +208,7 @@ pub(crate) fn resolve_effective_harness_descriptor(
     Ok(EffectiveHarnessDescriptor {
         command: effective_command,
         args,
+        base_args,
         env: effective_env.env,
     })
 }
@@ -1003,6 +1043,8 @@ mod tests {
 
     // ── cli_login_requirements: resolve_command integration ─────────────
 
+    use crate::managed_agents::CapabilityTransport;
+
     /// Construct a minimal `KnownAcpRuntime` stub for testing cli_login_requirements.
     /// `commands` are the adapter binaries; `underlying_cli` is the CLI name.
     fn make_cli_runtime(
@@ -1040,6 +1082,8 @@ mod tests {
             required_normalized_fields: &[],
             login_hint: None,
             auth_probe_args: None,
+            provider_selection: false,
+            capability_transport: CapabilityTransport::HARNESS_MANAGED,
         }
     }
 
@@ -1200,6 +1244,8 @@ mod tests {
     /// `&["codex-acp"]` when the binary is on PATH, or `&[<absolute_path>]`
     /// when resolving via absolute path.  `underlying_cli` is a portable
     /// stand-in so the adapter is not misclassified as `CliMissing`.
+    /// Struct-updates the shared CLI stub — the fixtures differ only in
+    /// id/label.
     fn make_codex_runtime(
         adapter_commands: &'static [&'static str],
         underlying_cli: Option<&'static str>,
@@ -1207,34 +1253,7 @@ mod tests {
         KnownAcpRuntime {
             id: "codex",
             label: "Codex",
-            commands: adapter_commands,
-            aliases: &[],
-            avatar_url: "",
-            mcp_command: None,
-            mcp_hooks: false,
-            underlying_cli,
-            cli_install_commands: &[],
-            cli_install_commands_windows: &[],
-            adapter_install_commands: &[],
-            cli_install_instructions_url: "",
-            adapter_install_instructions_url: "",
-            cli_install_hint: "",
-            adapter_install_hint: "",
-            skill_dir: None,
-            supports_acp_model_switching: false,
-            config_file_path: None,
-            config_file_format: None,
-            model_env_var: None,
-            provider_env_var: None,
-            provider_locked: false,
-            default_env: &[],
-            supports_acp_native_config: false,
-            thinking_env_var: None,
-            max_tokens_env_var: None,
-            context_limit_env_var: None,
-            required_normalized_fields: &[],
-            login_hint: None,
-            auth_probe_args: None,
+            ..make_cli_runtime(adapter_commands, underlying_cli)
         }
     }
 
@@ -1515,6 +1534,8 @@ mod tests {
             definition_respond_to: None,
             definition_respond_to_allowlist: Vec::new(),
             definition_parallelism: None,
+            definition_capability_policy: Default::default(),
+            capability_policy_override: None,
             relay_mesh: None,
         };
 
@@ -1674,187 +1695,4 @@ mod tests {
 // `RuntimeFileConfig` so there is no disk I/O and tests are deterministic.
 
 #[cfg(test)]
-mod goose_file_config_tests {
-    use std::collections::BTreeMap;
-
-    use super::*;
-    use crate::managed_agents::config_bridge::RuntimeFileConfig;
-
-    fn empty_env() -> EffectiveAgentEnv {
-        EffectiveAgentEnv {
-            env: BTreeMap::new(),
-            config_file_path: Some("~/.config/goose/config.yaml"),
-            effective_command: "goose".to_string(),
-        }
-    }
-
-    fn env_with(pairs: &[(&str, &str)]) -> EffectiveAgentEnv {
-        EffectiveAgentEnv {
-            env: pairs
-                .iter()
-                .map(|(k, v)| (k.to_string(), v.to_string()))
-                .collect(),
-            config_file_path: Some("~/.config/goose/config.yaml"),
-            effective_command: "goose".to_string(),
-        }
-    }
-
-    fn databricks_file_config() -> RuntimeFileConfig {
-        let mut extra = BTreeMap::new();
-        extra.insert(
-            "DATABRICKS_HOST".to_string(),
-            "https://dbc.example.com".to_string(),
-        );
-        RuntimeFileConfig {
-            provider: Some("databricks_v2".to_string()),
-            model: Some("goose-claude-4-6-opus".to_string()),
-            extra,
-            ..Default::default()
-        }
-    }
-
-    #[test]
-    fn goose_file_config_silences_databricks_host_requirement() {
-        // File has provider, model, and DATABRICKS_HOST — all requirements silenced.
-        let env = empty_env();
-        let cfg = databricks_file_config();
-        let result = goose_requirements(&env, Some(&cfg));
-        assert!(
-            result.is_empty(),
-            "all requirements should be silenced by goose file config; \
-             got: {:?}",
-            result
-        );
-    }
-
-    #[test]
-    fn goose_env_empty_file_absent_still_not_ready() {
-        // No env, no file config → provider and model both required.
-        let env = empty_env();
-        let result = goose_requirements(&env, None);
-        assert!(
-            result.contains(&Requirement::NormalizedField {
-                field: "provider".to_string()
-            }),
-            "provider must be required when absent from both env and file"
-        );
-        assert!(
-            result.contains(&Requirement::NormalizedField {
-                field: "model".to_string()
-            }),
-            "model must be required when absent from both env and file"
-        );
-    }
-
-    #[test]
-    fn goose_file_config_silences_provider_and_model_but_not_anthropic_key() {
-        // File has provider=anthropic and model, but ANTHROPIC_API_KEY is not
-        // in the file's `extra` map — it must still be required.
-        let cfg = RuntimeFileConfig {
-            provider: Some("anthropic".to_string()),
-            model: Some("claude-opus-4-5".to_string()),
-            extra: BTreeMap::new(),
-            ..Default::default()
-        };
-        let env = empty_env();
-        let result = goose_requirements(&env, Some(&cfg));
-        // Provider and model silenced.
-        assert!(
-            !result.contains(&Requirement::NormalizedField {
-                field: "provider".to_string()
-            }),
-            "provider silenced by file config"
-        );
-        assert!(
-            !result.contains(&Requirement::NormalizedField {
-                field: "model".to_string()
-            }),
-            "model silenced by file config"
-        );
-        // ANTHROPIC_API_KEY not in file extra → still required.
-        assert!(
-            result.contains(&Requirement::EnvKey {
-                key: "ANTHROPIC_API_KEY".to_string()
-            }),
-            "ANTHROPIC_API_KEY must remain required when not in file extra"
-        );
-    }
-
-    #[test]
-    fn goose_env_provider_wins_over_file_provider_for_cred_check() {
-        // Env has GOOSE_PROVIDER=anthropic (different from file's databricks_v2).
-        // The env provider must win for credential checking.
-        let env = env_with(&[
-            ("GOOSE_PROVIDER", "anthropic"),
-            ("GOOSE_MODEL", "claude-opus-4-5"),
-        ]);
-        let cfg = databricks_file_config(); // has provider=databricks_v2
-        let result = goose_requirements(&env, Some(&cfg));
-        // anthropic requires ANTHROPIC_API_KEY, not DATABRICKS_HOST.
-        assert!(
-            result.contains(&Requirement::EnvKey {
-                key: "ANTHROPIC_API_KEY".to_string()
-            }),
-            "env provider=anthropic must require ANTHROPIC_API_KEY"
-        );
-        assert!(
-            !result.contains(&Requirement::EnvKey {
-                key: "DATABRICKS_HOST".to_string()
-            }),
-            "env provider=anthropic must NOT require DATABRICKS_HOST"
-        );
-    }
-
-    #[test]
-    fn goose_flat_databricks_host_in_file_config_silences_requirement() {
-        // Will's typical goose config: flat DATABRICKS_HOST at the top level,
-        // no active_provider — provider inferred as "databricks".
-        // The parser must store extra["DATABRICKS_HOST"] = value (canonical key),
-        // and goose_requirements must then silence the DATABRICKS_HOST requirement.
-        let mut extra = BTreeMap::new();
-        extra.insert(
-            "DATABRICKS_HOST".to_string(),
-            "https://block.cloud.databricks.com".to_string(),
-        );
-        let cfg = RuntimeFileConfig {
-            provider: Some("databricks".to_string()),
-            model: Some("goose-claude-4-5".to_string()),
-            extra,
-            ..Default::default()
-        };
-        let env = empty_env();
-        let result = goose_requirements(&env, Some(&cfg));
-        // All requirements silenced — provider (file), model (file), DATABRICKS_HOST (file).
-        assert!(
-            result.is_empty(),
-            "flat DATABRICKS_HOST in file config must silence all requirements; \
-             got: {:?}",
-            result
-        );
-    }
-
-    #[test]
-    fn goose_goose_provider_databricks_flat_host_silences_databricks_host() {
-        // GOOSE_PROVIDER=databricks (not active_provider) + flat DATABRICKS_HOST.
-        // The parser canonicalizes to extra["DATABRICKS_HOST"]; readiness must silence it.
-        let mut extra = BTreeMap::new();
-        extra.insert(
-            "DATABRICKS_HOST".to_string(),
-            "https://dbc.example.com".to_string(),
-        );
-        let cfg = RuntimeFileConfig {
-            provider: Some("databricks".to_string()),
-            model: Some("some-model".to_string()),
-            extra,
-            ..Default::default()
-        };
-        let env = empty_env();
-        let result = goose_requirements(&env, Some(&cfg));
-        assert!(
-            !result.contains(&Requirement::EnvKey {
-                key: "DATABRICKS_HOST".to_string()
-            }),
-            "DATABRICKS_HOST must be silenced when canonical key is in file extra"
-        );
-    }
-}
+mod goose_file_config_tests;

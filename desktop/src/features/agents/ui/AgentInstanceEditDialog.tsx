@@ -25,11 +25,16 @@ import { Dialog } from "@/shared/ui/dialog";
 import { Input } from "@/shared/ui/input";
 import { setManagedAgentAutoRestart } from "@/shared/api/tauriManagedAgents";
 import { EditAgentAdvancedFields } from "./EditAgentAdvancedFields";
+import { EditAgentRuntimeField } from "./EditAgentRuntimeField";
+import { CapabilityPolicyFields } from "./CapabilityPolicyFields";
+import {
+  type CapabilityPolicyDraft,
+  draftFromCapabilityPolicy,
+} from "./capabilityPolicyLogic";
 import {
   AUTO_PROVIDER_DROPDOWN_VALUE,
   BLOCK_BUILD_HIDDEN_PROVIDER_IDS,
   CUSTOM_PROVIDER_DROPDOWN_VALUE,
-  formatRuntimeOptionLabel,
   getDefaultLlmModelLabel,
   getDefaultPersonaRuntime,
   getPersonaProviderOptions,
@@ -40,7 +45,6 @@ import {
   PERSONA_LABEL_OPTIONAL_CLASS,
   runtimeSupportsLlmProviderSelection,
   shouldClearKnownModelForSelectionScope,
-  sortPersonaRuntimes,
   type PersonaDropdownOption,
 } from "./agentConfigOptions";
 import {
@@ -51,6 +55,7 @@ import {
   computeEditAgentFormValidity,
   envVarsEqual,
   isEditAgentProviderSaveValid,
+  matchCatalogRuntimeId,
   resolveAgentCommandUpdate,
   resolveInheritedRuntimeSubmission,
   resolveRuntimeProviderCapability,
@@ -80,9 +85,13 @@ import { useAgentDialogDefaults } from "./useAgentDialogDefaults";
 import { AgentAiDefaultsNotice } from "./AgentAiDefaults";
 import { AgentDefaultsDialog } from "./AgentDefaultsDialog";
 import { useProviderApiKeyFieldState } from "./providerApiKeyFieldState";
-import { resolveModelFieldStatusMessage } from "./agentConfigControls";
+import {
+  CustomFieldInputRow,
+  resolveModelFieldStatusMessage,
+} from "./agentConfigControls";
 import { AdvancedRequiredBadge } from "./AdvancedRequiredBadge";
 import { showAgentProfileSyncWarning } from "./agentProfileSyncWarning";
+import { useInstanceCapabilityGate } from "./useInstanceCapabilityGate";
 
 const ADVANCED_FIELDS_MOTION_TRANSITION = {
   duration: 0.18,
@@ -153,6 +162,16 @@ export function AgentInstanceEditDialog({
   const [respondToAllowlist, setRespondToAllowlist] = React.useState<string[]>(
     agent.respondToAllowlist,
   );
+  // Capability policy override: draft + inherit toggle, seeded from the
+  // stored override (null = inherit the linked definition, or harness
+  // defaults when definition-less).
+  const [capabilityDraft, setCapabilityDraft] =
+    React.useState<CapabilityPolicyDraft>(() =>
+      draftFromCapabilityPolicy(agent.capabilityPolicyOverride),
+    );
+  const [inheritCapability, setInheritCapability] = React.useState(
+    agent.capabilityPolicyOverride == null,
+  );
   const [showAdvancedFields, setShowAdvancedFields] = React.useState(false);
   const [avatarUrl, setAvatarUrl] = React.useState(agent.avatarUrl ?? "");
   const [isAvatarUploadPending, setIsAvatarUploadPending] =
@@ -188,14 +207,17 @@ export function AgentInstanceEditDialog({
       setAutoRestartOnConfigChange(agent.autoRestartOnConfigChange);
       setRespondTo(agent.respondTo);
       setRespondToAllowlist(agent.respondToAllowlist);
+      setCapabilityDraft(
+        draftFromCapabilityPolicy(agent.capabilityPolicyOverride),
+      );
+      setInheritCapability(agent.capabilityPolicyOverride == null);
       setAvatarUrl(agent.avatarUrl ?? "");
       setShowAdvancedFields(false);
       setIsAvatarUploadPending(false);
       runtimeTouched.current = false;
-      const matched =
-        runtimes.find((r) => r.command?.trim() === agent.agentCommand.trim()) ??
-        runtimes.find((r) => r.id === agent.agentCommand.trim());
-      setSelectedRuntimeId(matched ? matched.id : "custom");
+      setSelectedRuntimeId(
+        matchCatalogRuntimeId(runtimes, agent, linkedPersona?.runtime),
+      );
       updateMutation.reset();
     }
   }, [open, agent.pubkey]);
@@ -205,68 +227,31 @@ export function AgentInstanceEditDialog({
     if (!open || runtimeTouched.current || runtimes.length === 0) {
       return;
     }
-    const matched =
-      runtimes.find((r) => r.command?.trim() === agent.agentCommand.trim()) ??
-      runtimes.find((r) => r.id === agent.agentCommand.trim());
-    if (matched) {
-      setSelectedRuntimeId(matched.id);
+    const next = matchCatalogRuntimeId(runtimes, agent, linkedPersona?.runtime);
+    if (next !== "custom") {
+      setSelectedRuntimeId(next);
     }
-  }, [open, runtimes, agent.agentCommand]);
-
-  // Build the sorted runtime catalog for the dropdown.
-  const sortedRuntimes = React.useMemo(
-    () => sortPersonaRuntimes(runtimes),
-    [runtimes],
-  );
+  }, [open, runtimes, agent, linkedPersona?.runtime]);
 
   const selectedRuntime = React.useMemo(
     () => runtimes.find((r) => r.id === selectedRuntimeId),
     [runtimes, selectedRuntimeId],
   );
 
-  const runtimeDropdownValue = selectedRuntimeId || NO_RUNTIME_DROPDOWN_VALUE;
-
-  const runtimeDropdownOptions: PersonaDropdownOption[] = React.useMemo(() => {
-    const options: PersonaDropdownOption[] = [
-      ...sortedRuntimes.map((candidate) => ({
-        label: formatRuntimeOptionLabel(candidate),
-        value: candidate.id,
-      })),
-      { label: "Custom command", value: "custom" },
-    ];
-    if (
-      selectedRuntimeId &&
-      selectedRuntimeId !== "custom" &&
-      !options.some((o) => o.value === selectedRuntimeId)
-    ) {
-      options.push({
-        label: `${selectedRuntimeId} (current)`,
-        value: selectedRuntimeId,
-      });
-    }
-    return options;
-  }, [sortedRuntimes, selectedRuntimeId]);
-
   // Resolve the dialog-opening command as the catalog loads. Edit-state runtime
   // ids mutate during selection changes and cannot identify the original state.
-  const originalRuntimeSupportsProvider = React.useMemo(() => {
-    const originalCommand = originalAgentCommand.trim();
-    const matched =
-      runtimes.find((r) => r.command?.trim() === originalCommand) ??
-      runtimes.find((r) => r.id === originalCommand);
-    return runtimeSupportsLlmProviderSelection(matched?.id ?? "");
-  }, [runtimes, originalAgentCommand]);
+  const originalCommand = originalAgentCommand.trim();
+  const originalRuntimeSupportsProvider = runtimeSupportsLlmProviderSelection(
+    runtimes.find((r) => r.command?.trim() === originalCommand) ??
+      runtimes.find((r) => r.id === originalCommand),
+  );
 
   // The runtime id that will actually be active after submit. When inheriting,
-  // resolve from the LINKED PERSONA's runtime — that is what will run once the
-  // override is cleared. Deriving from agent.agentCommand here is wrong for a
-  // pinned agent that just toggled "Inherit runtime from template": the override
-  // (e.g. a Claude pin) is still present on the record, so it would resolve to
-  // the old pin instead of the persona's runtime, hiding required credentials.
-  // Fall back to the agent.agentCommand dual-match (command path, then id) only
-  // when there is no linked persona or its runtime is unset. This single
-  // prospective id feeds BOTH the block-save gate (requiredEnvKeys) and the
-  // submit path so they never disagree on which runtime is being saved.
+  // resolve from the LINKED PERSONA's runtime — deriving from agent.agentCommand
+  // would return the just-cleared override pin instead, hiding required
+  // credentials. Falls back to the agent.agentCommand dual-match (command path,
+  // then id) only when the persona has no runtime. This one id feeds BOTH the
+  // block-save gate and the submit path so they never disagree on the runtime.
   const prospectiveRuntimeId = React.useMemo(() => {
     if (!inheritHarness) {
       return selectedRuntime?.id ?? selectedRuntimeId;
@@ -275,6 +260,15 @@ export function AgentInstanceEditDialog({
     if (personaRuntimeId) {
       return (
         runtimes.find((r) => r.id === personaRuntimeId)?.id ?? personaRuntimeId
+      );
+    }
+    // SPEC-R2-002: the record's own runtime id outranks command matching —
+    // a custom harness id must not borrow a command-colliding builtin's
+    // catalog entry.
+    const recordRuntimeId = agent.runtime?.trim();
+    if (recordRuntimeId) {
+      return (
+        runtimes.find((r) => r.id === recordRuntimeId)?.id ?? recordRuntimeId
       );
     }
     return (
@@ -291,12 +285,35 @@ export function AgentInstanceEditDialog({
     linkedPersona?.runtime,
     runtimes,
     agent.agentCommand,
+    agent.runtime,
     selectedRuntime?.id,
     selectedRuntimeId,
   ]);
 
+  const prospectiveRuntime = runtimes.find(
+    (r) => r.id === prospectiveRuntimeId,
+  );
+  // Release gate: capability controls are hidden for provider-backed agents
+  // until the provider script exports the lossless args transport (§7).
+  const isProviderBacked = agent.backend.type !== "local";
+  const {
+    support: capabilitySupport,
+    submitBlocked: capabilitySubmitBlocked,
+    skills: capabilitySkills,
+    forSubmit: capabilityForSubmit,
+  } = useInstanceCapabilityGate({
+    draft: capabilityDraft,
+    inheritFromDefinition: inheritCapability,
+    definitionPolicy: linkedPersona?.capabilityPolicy,
+    isProviderBacked,
+    prospectiveRuntime,
+    storedOverride: agent.capabilityPolicyOverride,
+    open,
+  });
   const llmProviderFieldVisible =
-    runtimeSupportsLlmProviderSelection(prospectiveRuntimeId);
+    runtimeSupportsLlmProviderSelection(prospectiveRuntime);
+  const selectedSupportsProvider =
+    runtimeSupportsLlmProviderSelection(selectedRuntime);
 
   // One-shot focus: when the dialog opens from a card deep-link, scroll and
   // focus the relevant field. The effect re-runs when `llmProviderFieldVisible`
@@ -377,6 +394,7 @@ export function AgentInstanceEditDialog({
     useRequiredCredentialState({
       open,
       prospectiveRuntimeId,
+      supportsProviderSelection: llmProviderFieldVisible,
       provider: inheritedSubmission.provider ?? "",
       globalProvider: inheritedProviderDefault.value,
       envVars: inheritedSubmission.envVars,
@@ -451,6 +469,7 @@ export function AgentInstanceEditDialog({
         model,
         provider: providerForDiscovery,
         runtime: selectedRuntime?.id ?? selectedRuntimeId,
+        supportsProviderSelection: selectedSupportsProvider,
       })
     ) {
       return;
@@ -465,6 +484,7 @@ export function AgentInstanceEditDialog({
     providerForDiscovery,
     selectedRuntime,
     selectedRuntimeId,
+    selectedSupportsProvider,
   ]);
 
   const selection: RuntimeModelProviderSelection = {
@@ -524,9 +544,8 @@ export function AgentInstanceEditDialog({
       selectionOnRuntimeChange(selection, {
         previousRuntime: previousRuntimeId,
         nextRuntime: nextRuntime?.id ?? nextRuntimeId,
-        nextRuntimeCanChooseProvider: runtimeSupportsLlmProviderSelection(
-          nextRuntime?.id ?? nextRuntimeId,
-        ),
+        nextRuntimeCanChooseProvider:
+          runtimeSupportsLlmProviderSelection(nextRuntime),
         lockedRuntimeReset: "full",
       }),
     );
@@ -543,6 +562,8 @@ export function AgentInstanceEditDialog({
         nextProvider === "relay-mesh"
           ? "buzz-agent"
           : (selectedRuntime?.id ?? selectedRuntimeId),
+      runtimeCanChooseProvider:
+        nextProvider === "relay-mesh" ? true : selectedSupportsProvider,
       nextValue,
       clearModelWhenApiKeyMissing: false,
     });
@@ -588,6 +609,10 @@ export function AgentInstanceEditDialog({
       requiredEnvKeyMissing,
     }) &&
     providerValid &&
+    // Capability-policy gates (useInstanceCapabilityGate).
+    !capabilitySubmitBlocked &&
+    // Save waits for the first catalog load (rule 5; submit reads the catalog projection).
+    !runtimesQuery.isLoading &&
     !updateMutation.isPending &&
     !isAvatarUploadPending;
 
@@ -616,14 +641,13 @@ export function AgentInstanceEditDialog({
       // Classify the effective post-submit runtime's provider capability as a
       // tri-state: "capable" persists the provider, "locked" clears it (only
       // when we KNOW it's provider-locked, e.g. Claude), "unknown" OMITS it so a
-      // transient/custom state never becomes a destructive write. Resolved
-      // STATICALLY (by id) so a not-yet-loaded catalog can't misclassify a known
-      // runtime as "unknown" — see resolveRuntimeProviderCapability. The runtime
-      // id is the shared prospectiveRuntimeId, so submit and the block-save gate
-      // always agree on which runtime is being saved.
+      // transient/custom state never becomes a destructive write. The capability
+      // fact is the Rust catalog projection (catalog-settle gate above covers
+      // the pre-load window); the id is the shared prospectiveRuntimeId, so
+      // submit and the block-save gate always agree on the runtime being saved.
       const providerRuntimeCapability = resolveRuntimeProviderCapability(
         prospectiveRuntimeId,
-        runtimeSupportsLlmProviderSelection(prospectiveRuntimeId),
+        runtimeSupportsLlmProviderSelection(prospectiveRuntime),
       );
 
       // Provider + env to persist — the shared inherited-submission snapshot
@@ -700,6 +724,7 @@ export function AgentInstanceEditDialog({
           respondToAllowlist.join(",") !== agent.respondToAllowlist.join(",")
             ? respondToAllowlist
             : undefined,
+        capabilityPolicyOverride: capabilityForSubmit(),
       };
 
       const result = await updateMutation.mutateAsync(input);
@@ -924,61 +949,16 @@ export function AgentInstanceEditDialog({
             />
 
             {/* Provider (runtime) */}
-            <div className="space-y-1.5">
-              <label
-                className="text-sm font-medium text-foreground"
-                htmlFor="edit-agent-runtime"
-              >
-                Provider
-              </label>
-              <PersonaDropdownField
-                disabled={updateMutation.isPending}
-                id="edit-agent-runtime"
-                onValueChange={handleRuntimeDropdownChange}
-                options={runtimeDropdownOptions}
-                placeholder="Choose a provider"
-                value={runtimeDropdownValue}
-              />
-              {selectedRuntime ? (
-                <p className="text-xs text-muted-foreground">
-                  Detected at{" "}
-                  <span className="font-medium">
-                    {selectedRuntime.binaryPath ??
-                      selectedRuntime.command ??
-                      selectedRuntime.id}
-                  </span>
-                </p>
-              ) : null}
-            </div>
-            {selectedRuntimeId === "custom" && !inheritHarness ? (
-              <div className="space-y-1.5">
-                <label
-                  className="text-sm font-medium text-foreground"
-                  htmlFor="edit-agent-command"
-                >
-                  Agent command
-                </label>
-                <div
-                  className={cn(
-                    "flex min-h-11 items-center px-3",
-                    PERSONA_FIELD_SHELL_CLASS,
-                  )}
-                >
-                  <Input
-                    autoCorrect="off"
-                    className={cn(
-                      "h-8 px-0 py-0 leading-6",
-                      PERSONA_FIELD_CONTROL_CLASS,
-                    )}
-                    disabled={updateMutation.isPending}
-                    id="edit-agent-command"
-                    onChange={(event) => setAgentCommand(event.target.value)}
-                    placeholder="Full path or shell command"
-                    value={agentCommand}
-                  />
-                </div>
-              </div>
-            ) : null}
+            <EditAgentRuntimeField
+              agentCommand={agentCommand}
+              disabled={updateMutation.isPending}
+              inheritHarness={inheritHarness}
+              onAgentCommandChange={setAgentCommand}
+              onRuntimeChange={handleRuntimeDropdownChange}
+              runtimes={runtimes}
+              selectedRuntime={selectedRuntime}
+              selectedRuntimeId={selectedRuntimeId}
+            />
             {/* LLM provider */}
             {llmProviderFieldVisible ? (
               <div className="space-y-1.5">
@@ -1006,26 +986,14 @@ export function AgentInstanceEditDialog({
                   value={providerSelectValue}
                 />
                 {isCustomProviderEditing ? (
-                  <div
-                    className={cn(
-                      "mt-2 flex min-h-11 items-center px-3",
-                      PERSONA_FIELD_SHELL_CLASS,
-                    )}
-                  >
-                    <Input
-                      aria-label="Custom provider ID"
-                      autoCorrect="off"
-                      className={cn(
-                        "h-8 px-0 py-0 leading-6",
-                        PERSONA_FIELD_CONTROL_CLASS,
-                      )}
-                      disabled={updateMutation.isPending}
-                      id="edit-agent-custom-provider"
-                      onChange={(event) => setProvider(event.target.value)}
-                      placeholder="Custom provider ID"
-                      value={provider}
-                    />
-                  </div>
+                  <CustomFieldInputRow
+                    ariaLabel="Custom provider ID"
+                    disabled={updateMutation.isPending}
+                    id="edit-agent-custom-provider"
+                    onValueChange={setProvider}
+                    placeholder="Custom provider ID"
+                    value={provider}
+                  />
                 ) : null}
               </div>
             ) : null}
@@ -1075,26 +1043,14 @@ export function AgentInstanceEditDialog({
                 value={modelSelectValue}
               />
               {showCustomModelInput ? (
-                <div
-                  className={cn(
-                    "mt-2 flex min-h-11 items-center px-3",
-                    PERSONA_FIELD_SHELL_CLASS,
-                  )}
-                >
-                  <Input
-                    aria-label="Custom model ID"
-                    autoCorrect="off"
-                    className={cn(
-                      "h-8 px-0 py-0 leading-6",
-                      PERSONA_FIELD_CONTROL_CLASS,
-                    )}
-                    disabled={updateMutation.isPending}
-                    id="edit-agent-custom-model"
-                    onChange={(event) => setModel(event.target.value)}
-                    placeholder="Custom model ID"
-                    value={model}
-                  />
-                </div>
+                <CustomFieldInputRow
+                  ariaLabel="Custom model ID"
+                  disabled={updateMutation.isPending}
+                  id="edit-agent-custom-model"
+                  onValueChange={setModel}
+                  placeholder="Custom model ID"
+                  value={model}
+                />
               ) : null}
               {modelStatusMessage ? (
                 <p className="text-xs text-muted-foreground">
@@ -1116,6 +1072,21 @@ export function AgentInstanceEditDialog({
               onOpenChange={setAiDefaultsOpen}
               open={aiDefaultsOpen}
               returnFocusRef={aiDefaultsTriggerRef}
+            />
+
+            <CapabilityPolicyFields
+              definitionPolicy={linkedPersona?.capabilityPolicy ?? null}
+              disabled={updateMutation.isPending}
+              draft={capabilityDraft}
+              harnessSource={prospectiveRuntime?.source}
+              idPrefix="edit-agent-capability"
+              inheritFromDefinition={inheritCapability}
+              onDraftChange={setCapabilityDraft}
+              onInheritFromDefinitionChange={setInheritCapability}
+              providerBacked={isProviderBacked}
+              skills={capabilitySkills}
+              support={capabilitySupport}
+              variant="instance"
             />
 
             {/* Advanced settings */}

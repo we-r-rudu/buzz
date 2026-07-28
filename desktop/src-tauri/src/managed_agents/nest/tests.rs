@@ -428,6 +428,7 @@ fn make_persona(id: &str, display_name: &str) -> AgentDefinition {
         respond_to: None,
         respond_to_allowlist: Vec::new(),
         parallelism: None,
+        capability_policy: Default::default(),
         created_at: String::new(),
         updated_at: String::new(),
     }
@@ -485,6 +486,8 @@ fn make_agent(name: &str, persona_id: Option<&str>) -> ManagedAgentRecord {
         definition_respond_to: None,
         definition_respond_to_allowlist: Vec::new(),
         definition_parallelism: None,
+        definition_capability_policy: Default::default(),
+        capability_policy_override: None,
         relay_mesh: None,
     }
 }

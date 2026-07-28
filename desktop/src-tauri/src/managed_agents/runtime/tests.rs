@@ -180,6 +180,8 @@ fn fixture(
         definition_respond_to: None,
         definition_respond_to_allowlist: Vec::new(),
         definition_parallelism: None,
+        definition_capability_policy: Default::default(),
+        capability_policy_override: None,
         relay_mesh: None,
     }
 }
@@ -300,6 +302,7 @@ fn persona_with_provider(
         respond_to: None,
         respond_to_allowlist: Vec::new(),
         parallelism: None,
+        capability_policy: Default::default(),
         created_at: "2026-06-09T00:00:00Z".to_string(),
         updated_at: "2026-06-09T00:00:00Z".to_string(),
     }
@@ -1006,56 +1009,6 @@ fn replacement_failure_keeps_receipt() {
     assert!(!removed.get());
 }
 
-// ── workspace pair-key resolution (summary/stop scoping) ────────────────
-
-#[test]
-fn unpinned_record_resolves_pair_key_per_workspace() {
-    // Community-scoped truth: an unpinned agent running only on relay A must
-    // read as running in workspace A and stopped in workspace B — the pair
-    // key the summary looks up differs per workspace.
-    let pubkey = "aa".repeat(32);
-    let key_a = super::resolve_workspace_pair_key(&pubkey, "", "wss://one.example").unwrap();
-    let key_b = super::resolve_workspace_pair_key(&pubkey, "", "wss://two.example").unwrap();
-
-    let runtimes = std::collections::HashMap::from([(key_a.clone(), ())]);
-    assert!(runtimes.contains_key(&key_a));
-    assert!(!runtimes.contains_key(&key_b));
-}
-
-#[test]
-fn stored_relay_pin_is_ignored_in_pair_key_resolution() {
-    // Legacy pins are ignored (#2122): a record carrying a creation-era
-    // `relay_url` resolves the same per-workspace pair key an unpinned record
-    // does, so summaries/stop act on the community being viewed.
-    let pubkey = "aa".repeat(32);
-    let from_a =
-        super::resolve_workspace_pair_key(&pubkey, "wss://pinned.example", "wss://one.example")
-            .unwrap();
-    let from_b =
-        super::resolve_workspace_pair_key(&pubkey, "wss://pinned.example", "wss://two.example")
-            .unwrap();
-    assert_ne!(from_a, from_b);
-    assert_eq!(from_a.relay_url, "wss://one.example");
-    assert_eq!(from_b.relay_url, "wss://two.example");
-}
-
-#[test]
-fn workspace_pair_key_is_canonical() {
-    // Spawn stamps the canonical key; lookup must hit the same entry even
-    // when the workspace relay is written in a non-canonical form.
-    let pubkey = "aa".repeat(32);
-    let stamped = super::resolve_workspace_pair_key(&pubkey, "", "wss://one.example").unwrap();
-    let viewed = super::resolve_workspace_pair_key(&pubkey, "", "WSS://One.Example:443/").unwrap();
-    assert_eq!(stamped, viewed);
-}
-
-#[test]
-fn invalid_pubkey_resolves_no_pair_key() {
-    // Key-less records (keys minted on first start) cannot form a pair key;
-    // the summary must fall back to the stopped/legacy-pid path, not panic.
-    assert!(super::resolve_workspace_pair_key("not-a-key", "", "wss://one.example").is_none());
-}
-
 // ── Custom-harness orphan sweep coverage ─────────────────────────────────────
 //
 // The sweep/receipt ownership gate must include any process carrying the
@@ -1292,38 +1245,4 @@ fn make_pair_runtime_placeholder() -> crate::managed_agents::ManagedAgentPairRun
         job: None,
     };
     crate::managed_agents::ManagedAgentPairRuntime::starting(process)
-}
-
-// ── restart_eligible tests ──────────────────────────────────────────────
-
-#[test]
-fn restart_eligible_true_when_non_orphan_has_hash_drift() {
-    assert!(super::restart_eligible(false, true, false));
-}
-
-#[test]
-fn restart_eligible_true_when_non_orphan_has_availability_drift() {
-    assert!(super::restart_eligible(false, false, true));
-}
-
-#[test]
-fn restart_eligible_false_when_orphan_has_hash_drift() {
-    // An orphan can never be restarted successfully — spawn refuses it —
-    // so hash drift alone must not surface "Restart required".
-    assert!(!super::restart_eligible(true, true, false));
-}
-
-#[test]
-fn restart_eligible_false_when_orphan_has_availability_drift() {
-    assert!(!super::restart_eligible(true, false, true));
-}
-
-#[test]
-fn restart_eligible_false_when_orphan_has_no_drift() {
-    assert!(!super::restart_eligible(true, false, false));
-}
-
-#[test]
-fn restart_eligible_false_when_non_orphan_has_no_drift() {
-    assert!(!super::restart_eligible(false, false, false));
 }

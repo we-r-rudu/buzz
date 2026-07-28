@@ -414,6 +414,9 @@ pub async fn confirm_agent_snapshot_import(
             respond_to: respond_to_wire.clone(),
             respond_to_allowlist: minted.respond_to_allowlist.clone(),
             parallelism: minted_parallelism,
+            // Snapshots carry no capability policy — imports mint with the
+            // default (harness) policy rather than silently injecting one.
+            capability_policy: Default::default(),
             created_at: now.clone(),
             updated_at: now.clone(),
         };
@@ -481,6 +484,8 @@ pub async fn confirm_agent_snapshot_import(
             definition_respond_to: respond_to_wire.clone(),
             definition_respond_to_allowlist: minted.respond_to_allowlist.clone(),
             definition_parallelism: minted_parallelism,
+            definition_capability_policy: Default::default(),
+            capability_policy_override: None,
             relay_mesh: None,
             runtime: snapshot.definition.runtime.clone(),
             name_pool: snapshot.definition.name_pool.clone(),

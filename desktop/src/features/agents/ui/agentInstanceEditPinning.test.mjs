@@ -110,10 +110,12 @@ test("rehost_gate_validatesTheSubmissionSnapshot_sameValuesAsSubmit", () => {
     inheritTransitionState();
 
   // Gate half: the credential requirement must be computed from the
-  // PROSPECTIVE runtime + the submission snapshot's provider/env.
-  const providerForRequiredKeys = runtimeSupportsLlmProviderSelection(
-    prospectiveRuntimeId,
-  )
+  // PROSPECTIVE runtime + the submission snapshot's provider/env. The
+  // capability fact is the Rust catalog projection for the prospective
+  // entry (buzz-agent → provider-capable).
+  const providerForRequiredKeys = runtimeSupportsLlmProviderSelection({
+    providerSelection: true,
+  })
     ? (inheritedSubmission.provider ?? "")
     : "";
   const requiredKeys = requiredCredentialEnvKeys(
@@ -210,7 +212,7 @@ test("rehost_submit_persistsToggleAsCommandClear_andOmitsHarnessOverride", () =>
     inheritTransitionState();
   const capability = resolveRuntimeProviderCapability(
     prospectiveRuntimeId,
-    runtimeSupportsLlmProviderSelection(prospectiveRuntimeId),
+    runtimeSupportsLlmProviderSelection({ providerSelection: true }),
   );
   assert.equal(capability, "capable");
   const providerUpdate =

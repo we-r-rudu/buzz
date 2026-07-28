@@ -3909,7 +3909,15 @@ async fn spawn_and_init(
 }
 
 async fn spawn_auth_client(agent: &AuthAgentArgs) -> Result<AcpClient, acp::AcpError> {
-    let agent_args = config::normalize_agent_args(&agent.agent_command, agent.agent_args.clone());
+    // JSON transport wins over CSV whenever present (including `[]`).
+    let agent_args = config::normalize_agent_args(
+        &agent.agent_command,
+        agent
+            .agent_args_json
+            .clone()
+            .map(|json| json.0)
+            .unwrap_or_else(|| agent.agent_args.clone()),
+    );
     AcpClient::spawn(&agent.agent_command, &agent_args, &[], false).await
 }
 
@@ -4031,7 +4039,14 @@ async fn run_authenticate(args: AuthenticateArgs) -> Result<()> {
 async fn run_models(args: ModelsArgs) -> Result<()> {
     use acp::{extract_model_config_options, extract_model_state};
 
-    let agent_args = config::normalize_agent_args(&args.agent.agent_command, args.agent.agent_args);
+    // JSON transport wins over CSV whenever present (including `[]`).
+    let agent_args = config::normalize_agent_args(
+        &args.agent.agent_command,
+        args.agent
+            .agent_args_json
+            .map(|json| json.0)
+            .unwrap_or(args.agent.agent_args),
+    );
     let cwd = std::env::current_dir()
         .unwrap_or_else(|_| std::path::PathBuf::from("/"))
         .to_string_lossy()

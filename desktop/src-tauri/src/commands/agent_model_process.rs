@@ -40,6 +40,12 @@ pub(super) async fn run_agent_models_command(
             .arg("--json")
             .env("BUZZ_ACP_AGENT_COMMAND", &agent_command)
             .env("BUZZ_ACP_AGENT_ARGS", agent_args.join(","));
+        // Lossless JSON args transport — see spawn_agent_child's mixed-version
+        // note. Probes do NOT compile capability policy: policy constrains the
+        // managed run, not diagnostics.
+        if let Ok(json) = serde_json::to_string(&agent_args) {
+            cmd.env("BUZZ_ACP_AGENT_ARGS_JSON", json);
+        }
         if let Some(meta) = known_acp_runtime(&agent_command) {
             for (key, value) in meta.default_env {
                 if std::env::var(key).is_err() {

@@ -56,6 +56,7 @@ import type {
   RawInstallRuntimeResult,
   RuntimeFileConfigSubset,
 } from "@/shared/api/tauri";
+import type { AgentCapabilityPolicy } from "@/shared/api/capabilityPolicy";
 import { normalizePubkey } from "@/shared/lib/pubkey";
 
 type TestIdentity = {
@@ -119,6 +120,8 @@ type MockPersonaSeed = {
   model?: string | null;
   provider?: string | null;
   namePool?: string[];
+  /** Stored capability policy (SPEC-R2-001 recovery flows). Omitted = defaults. */
+  capabilityPolicy?: AgentCapabilityPolicy | null;
 };
 
 type MockTeamSeed = {
@@ -219,6 +222,10 @@ type E2eConfig = {
       acp?: MockCommandAvailability;
       mcp?: MockCommandAvailability;
     };
+    /** Backend providers returned by `discover_backend_providers` (default [] —
+     *  the real scan finds buzz-backend-* binaries). Seeded providers also
+     *  answer `probe_backend_provider` with an ok, schema-less result. */
+    backendProviders?: { id: string; binaryPath?: string }[];
     managedAgents?: MockManagedAgentSeed[];
     /** Per agent+relay runtime rows for the pair-scoped lifecycle commands
      *  (`list/start/stop/restart_managed_agent_runtime`). */
@@ -814,6 +821,8 @@ type RawPersona = {
   respond_to?: string | null;
   respond_to_allowlist?: string[];
   parallelism?: number | null;
+  /** Absent = harness defaults (skip-serialized when default server-side). */
+  capability_policy?: AgentCapabilityPolicy;
   created_at: string;
   updated_at: string;
 };
@@ -2190,6 +2199,9 @@ function resetMockPersonas(config?: E2eConfig) {
       is_active: persona.isActive ?? true,
       source_team: persona.sourceTeam ?? null,
       env_vars: { ...(persona.envVars ?? {}) },
+      ...(persona.capabilityPolicy
+        ? { capability_policy: persona.capabilityPolicy }
+        : {}),
       created_at: now,
       updated_at: now,
     });
@@ -7040,6 +7052,9 @@ async function handleDiscoverAcpRuntimes(
       auth_status: { status: "not_applicable" },
       source: "builtin",
       login_hint: undefined,
+      // Mirrors the Rust catalog (discovery/runtime_metadata.rs): goose drives
+      // provider selection; capability facts stay absent (harness-managed).
+      provider_selection: true,
     },
     {
       id: "claude",
@@ -7099,6 +7114,7 @@ async function handleDiscoverAcpRuntimes(
       auth_status: { status: "not_applicable" },
       source: "builtin",
       login_hint: undefined,
+      provider_selection: true,
     },
   ];
   return mergeMockCustomHarnesses(
@@ -7341,6 +7357,29 @@ function applyMockPersonaBehavior(
   persona.parallelism = behavior.parallelism ?? null;
 }
 
+/**
+ * Mirrors `apply_persona_capability_policy`: absent = don't touch; present =
+ * replace as one group. An empty group (`{}` — the clearing submit) or null
+ * stores the default, which serde re-omits (absent-stable rollback, §9).
+ */
+function applyMockPersonaCapabilityPolicy(
+  persona: RawPersona,
+  capabilityPolicy: AgentCapabilityPolicy | null | undefined,
+) {
+  if (capabilityPolicy === undefined) {
+    return;
+  }
+  if (
+    capabilityPolicy === null ||
+    (capabilityPolicy.tools === undefined &&
+      capabilityPolicy.skills === undefined)
+  ) {
+    delete persona.capability_policy;
+    return;
+  }
+  persona.capability_policy = capabilityPolicy;
+}
+
 async function handleCreatePersona(args: {
   input: {
     displayName: string;
@@ -7351,6 +7390,7 @@ async function handleCreatePersona(args: {
     provider?: string;
     envVars?: Record<string, string>;
     behavior?: PersonaBehaviorInput;
+    capabilityPolicy?: AgentCapabilityPolicy | null;
   };
 }): Promise<RawPersona> {
   const now = new Date().toISOString();
@@ -7370,6 +7410,7 @@ async function handleCreatePersona(args: {
     updated_at: now,
   };
   applyMockPersonaBehavior(persona, args.input.behavior);
+  applyMockPersonaCapabilityPolicy(persona, args.input.capabilityPolicy);
   mockPersonas.push(persona);
   return { ...persona };
 }
@@ -7385,6 +7426,7 @@ async function handleUpdatePersona(args: {
     provider?: string;
     envVars?: Record<string, string>;
     behavior?: PersonaBehaviorInput;
+    capabilityPolicy?: AgentCapabilityPolicy | null;
   };
 }): Promise<RawPersona> {
   const persona = mockPersonas.find(
@@ -7404,6 +7446,7 @@ async function handleUpdatePersona(args: {
     persona.env_vars = { ...args.input.envVars };
   }
   applyMockPersonaBehavior(persona, args.input.behavior);
+  applyMockPersonaCapabilityPolicy(persona, args.input.capabilityPolicy);
   persona.updated_at = new Date().toISOString();
 
   return { ...persona };
@@ -10194,10 +10237,35 @@ export function maybeInstallE2eTauriMocks() {
           payload as { runtimeId?: string },
           activeConfig,
         );
-      case "discover_backend_providers":
-        return [];
-      case "probe_backend_provider":
-        return { ok: false, error: "mock: no providers available" };
+      case "discover_backend_providers": {
+        // Mock provider discovery (SPEC-007 e2e): the real command scans for
+        // buzz-backend-* binaries; the mock returns only explicitly seeded
+        // providers so specs can drive the provider destination picker.
+        const seeded = activeConfig?.mock?.backendProviders ?? [];
+        return seeded.map((provider) => ({
+          id: provider.id,
+          binaryPath: provider.binaryPath ?? `/usr/local/bin/${provider.id}`,
+        }));
+      }
+      case "probe_backend_provider": {
+        const seeded = activeConfig?.mock?.backendProviders ?? [];
+        const requested = (payload as { binaryPath?: string } | undefined)
+          ?.binaryPath;
+        const matched = seeded.find(
+          (provider) =>
+            (provider.binaryPath ?? `/usr/local/bin/${provider.id}`) ===
+            requested,
+        );
+        if (!matched) {
+          return { ok: false, error: "mock: no providers available" };
+        }
+        return {
+          ok: true,
+          name: matched.id,
+          version: "1.0.0-mock",
+          config_schema: { type: "object", properties: {}, required: [] },
+        };
+      }
       case "discover_managed_agent_prereqs":
         return handleDiscoverManagedAgentPrereqs(
           payload as Parameters<typeof handleDiscoverManagedAgentPrereqs>[0],
@@ -10214,6 +10282,17 @@ export function maybeInstallE2eTauriMocks() {
         return handleListRelayAgents(activeConfig);
       case "list_personas":
         return handleListPersonas();
+      // Mirrors the Rust static catalog (managed_agents/prompt_skills.rs):
+      // id/label/description only — prompt text never leaves Rust.
+      case "list_buzz_prompt_skills":
+        return [
+          {
+            id: "buzz-cli",
+            label: "Buzz CLI",
+            description:
+              "How to use the `buzz` CLI for channels, messages, and agent operations.",
+          },
+        ];
       case "create_persona":
         return handleCreatePersona(
           payload as Parameters<typeof handleCreatePersona>[0],

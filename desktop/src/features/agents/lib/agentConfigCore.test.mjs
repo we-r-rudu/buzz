@@ -182,3 +182,50 @@ test("catalog mismatch cleanup is named and restricted to onboarding", () => {
     onCatalogMismatch: "explainOnly",
   });
 });
+
+// ── capabilitySupport projection (AGENTS.md one rule) ────────────────────────
+
+test("verified capability support projects as a control descriptor", () => {
+  const support = {
+    toolPolicy: "verified",
+    supportedToolIds: ["files.read", "web.search"],
+    unsupportedToolIds: ["browser"],
+    skillsDisable: true,
+    ambientSkillNote:
+      "Disabling ambient skills also disables the bundled buzz-cli skill.",
+  };
+  const model = deriveAgentConfigFieldModel({
+    config,
+    runtime: runtime("omp", { capabilitySupport: support }),
+    scope: "instance",
+  });
+
+  const capability = field(model, "capabilityPolicy");
+  assert.equal(capability.render, "control");
+  assert.deepEqual(capability.support, support);
+});
+
+test("harness-managed support projects as harnessManaged; absent support omits the descriptor", () => {
+  const managed = deriveAgentConfigFieldModel({
+    config,
+    runtime: runtime("goose", {
+      capabilitySupport: {
+        toolPolicy: "harness_managed",
+        supportedToolIds: [],
+        unsupportedToolIds: ["files.read"],
+        skillsDisable: false,
+        ambientSkillNote: null,
+      },
+    }),
+    scope: "instance",
+  });
+  assert.equal(field(managed, "capabilityPolicy").render, "harnessManaged");
+
+  // Pre-feature fixtures carry no capability facts — no descriptor at all.
+  const legacy = deriveAgentConfigFieldModel({
+    config,
+    runtime: runtime("goose"),
+    scope: "instance",
+  });
+  assert.equal(field(legacy, "capabilityPolicy"), undefined);
+});

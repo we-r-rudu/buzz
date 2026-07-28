@@ -1,6 +1,7 @@
 import type {
   AcpRuntimeCatalogEntry,
   GlobalAgentConfig,
+  RuntimeCapabilitySupport,
 } from "@/shared/api/types";
 import { BUZZ_AGENT_THINKING_EFFORT } from "../ui/buzzAgentConfig";
 
@@ -69,6 +70,16 @@ export type AgentConfigFieldDescriptor =
         | { kind: "acpConfigOption"; id: string; category: string };
       render: "control" | "deferredUntilNativeOptionsAvailable";
       value: string | null;
+    }
+  | {
+      kind: "capabilityPolicy";
+      /** Capability-policy facts projected from the Rust runtime catalog —
+       * the ONLY source the UI reads (features/agents/AGENTS.md one rule). */
+      support: RuntimeCapabilitySupport;
+      /** "control" = verified tool-policy transport; "harnessManaged" = the
+       * harness owns its tool set (explicit tool policy locked; skills still
+       * deliver via prompt sections). */
+      render: "control" | "harnessManaged";
     };
 
 export type AgentConfigOmission = {
@@ -179,6 +190,17 @@ export function deriveAgentConfigFieldModel({
     });
   }
 
+  if (runtime?.capabilitySupport) {
+    fields.push({
+      kind: "capabilityPolicy",
+      support: runtime.capabilitySupport,
+      render:
+        runtime.capabilitySupport.toolPolicy === "verified"
+          ? "control"
+          : "harnessManaged",
+    });
+  }
+
   return {
     fields,
     omissions,
@@ -205,5 +227,21 @@ export function getRenderableEffortField(
   return model.fields.find(
     (field): field is Extract<AgentConfigFieldDescriptor, { kind: "effort" }> =>
       field.kind === "effort" && field.render === "control",
+  );
+}
+
+/** The capability-policy descriptor, when the runtime catalog supplies one. */
+export function getCapabilityPolicyField(
+  model: AgentConfigFieldModel,
+):
+  | Extract<AgentConfigFieldDescriptor, { kind: "capabilityPolicy" }>
+  | undefined {
+  return model.fields.find(
+    (
+      field,
+    ): field is Extract<
+      AgentConfigFieldDescriptor,
+      { kind: "capabilityPolicy" }
+    > => field.kind === "capabilityPolicy",
   );
 }

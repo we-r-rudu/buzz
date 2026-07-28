@@ -9,7 +9,7 @@ use buzz_core_pkg::kind::KIND_PERSONA;
 use nostr::{EventBuilder, Kind, Tag};
 use serde::{Deserialize, Serialize};
 
-use super::{AgentDefinition, ManagedAgentRecord};
+use super::{AgentCapabilityPolicy, AgentDefinition, ManagedAgentRecord};
 use crate::app_state::AppState;
 
 /// The JSON body stored in a persona event's content field.
@@ -48,6 +48,26 @@ pub struct PersonaEventContent {
     pub respond_to_allowlist: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parallelism: Option<u32>,
+    /// Harness-neutral capability policy (§1.3). LAST in field order so
+    /// absent/default policies serialize byte-identically to the pre-feature
+    /// era and `persona_content_hash` stays fleet-stable (guarded by
+    /// `policy_absent_persona_hash_stable_across_activation`). NIP-AP readers
+    /// ignore unknown fields, so old clients parse new events fine; an old
+    /// client re-publishing after a local edit drops the field — the same
+    /// documented mixed-version caveat as the behavioral-quad activation.
+    ///
+    /// Deserialization is deliberately tolerant (`deserialize_with`): unknown
+    /// future capability/skill ids and unknown sub-groups are filtered at
+    /// this wire boundary instead of failing the whole event parse — the
+    /// NIP-AP "readers MUST ignore unknown ids and unknown sub-groups"
+    /// contract (general-005). Serialization keeps the closed enum, so
+    /// writers emit known ids only and hash inputs never change.
+    #[serde(
+        default,
+        deserialize_with = "crate::managed_agents::types::deserialize_capability_policy_tolerant",
+        skip_serializing_if = "AgentCapabilityPolicy::is_default"
+    )]
+    pub capability_policy: AgentCapabilityPolicy,
 }
 
 /// Derive the d-tag (persona slug) from a `AgentDefinition`.
@@ -155,6 +175,36 @@ pub fn build_persona_delete(d_tag: &str, owner_pubkey_hex: &str) -> Result<Event
     Ok(EventBuilder::new(Kind::Custom(5), "").tags(vec![tag]))
 }
 
+/// Inbound composed-prompt guard (round2-general-002), the 30175 half.
+///
+/// Every LOCAL save path rejects a base prompt + skill selection whose
+/// composition exceeds `MAX_COMPOSED_PROMPT_BYTES` (SPEC-004); the wire
+/// boundary must not persist a state local boundaries forbid, or linked
+/// agents would refuse spawn/deploy at resolve time until manually
+/// repaired. Tolerance-shaped like the unknown-id filter (general-005):
+/// never reject the event, never skip the apply (retention dedups on
+/// created_at+content, so a post-retention skip would poison the retained
+/// head — this runs at the parse boundary, pre-retention by construction).
+/// Only the SKILLS sub-group affects composed size, so an over-cap event
+/// drops skills to Inherit and keeps everything else — tools-policy bytes
+/// included (mixed-version tolerance). A bare over-cap prompt with no skill
+/// selection applies as-is: the same loud InvalidPolicy-at-resolve failure
+/// mode as a hand-edited store, never a silent truncation.
+fn drop_over_cap_skill_selection(mut content: PersonaEventContent) -> PersonaEventContent {
+    let crate::managed_agents::types::SkillPolicy::Selected { selected } =
+        &content.capability_policy.skills
+    else {
+        return content;
+    };
+    let base_len = content.system_prompt.as_deref().map_or(0, str::len);
+    let composed_len =
+        base_len + crate::managed_agents::prompt_skills::skill_sections_len(selected);
+    if composed_len > crate::managed_agents::prompt_skills::MAX_COMPOSED_PROMPT_BYTES {
+        content.capability_policy.skills = crate::managed_agents::types::SkillPolicy::Inherit;
+    }
+    content
+}
+
 /// Parse a kind:30175 event back into a `AgentDefinition`.
 ///
 /// The event's d-tag becomes the persona ID and slug.
@@ -174,6 +224,7 @@ pub fn persona_from_event(event: &nostr::Event) -> Result<AgentDefinition, Strin
 
     let content: PersonaEventContent = serde_json::from_str(event.content.as_ref())
         .map_err(|e| format!("failed to parse persona event content: {e}"))?;
+    let content = drop_over_cap_skill_selection(content);
 
     let created_at = event.created_at.to_human_datetime();
 
@@ -194,6 +245,7 @@ pub fn persona_from_event(event: &nostr::Event) -> Result<AgentDefinition, Strin
         respond_to: content.respond_to,
         respond_to_allowlist: content.respond_to_allowlist,
         parallelism: content.parallelism,
+        capability_policy: content.capability_policy,
         created_at: created_at.clone(),
         updated_at: created_at,
     })
@@ -355,6 +407,7 @@ pub fn persona_event_content(record: &AgentDefinition) -> PersonaEventContent {
         respond_to: record.respond_to.clone(),
         respond_to_allowlist: record.respond_to_allowlist.clone(),
         parallelism: record.parallelism,
+        capability_policy: record.capability_policy.clone(),
     }
 }
 

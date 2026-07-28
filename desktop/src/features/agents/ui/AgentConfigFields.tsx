@@ -327,7 +327,7 @@ export function AgentConfigFields({
   const credentialProvider =
     providerFieldVisible && !isCustomProvider ? effectiveProvider : "";
   const credentialRuntimeId = runtimeSupportsLlmProviderSelection(
-    selectedRuntimeId,
+    selectedRuntime,
   )
     ? selectedRuntimeId
     : "buzz-agent";

@@ -488,6 +488,7 @@ fn sample_persona() -> AgentDefinition {
         respond_to: None,
         respond_to_allowlist: Vec::new(),
         parallelism: None,
+        capability_policy: Default::default(),
         created_at: "2026-01-01T00:00:00Z".to_string(),
         updated_at: "2026-01-02T00:00:00Z".to_string(),
     }
@@ -647,5 +648,158 @@ fn mint_rejects_out_of_range_input_parallelism() {
     assert!(
         !err.contains("definition"),
         "input-branch error must not blame the definition: {err}"
+    );
+}
+
+// ── Harness-neutral capability policy (serde contract) ──────────────────────
+
+use super::{AgentCapabilityPolicy, SkillPolicy, ToolCapabilityId, ToolPolicy};
+
+/// HC-004: a pre-feature store has no policy bytes. It must deserialize to
+/// the default policy, and re-serialization must introduce NO policy bytes
+/// (absent-stable) — so opening + saving a store with a new build rewrites
+/// nothing policy-related. (Records carry other always-serialized fields, so
+/// the pin is policy-byte absence + a serialization fixed point, not full
+/// byte-identity with the hand-written legacy string.)
+#[test]
+fn legacy_persona_without_policy_bytes_round_trips_without_policy_bytes() {
+    const LEGACY: &str = r#"{
+        "id": "builtin:fizz",
+        "display_name": "Fizz",
+        "avatar_url": null,
+        "system_prompt": "Prompt",
+        "created_at": "2026-03-19T00:00:00Z",
+        "updated_at": "2026-03-19T00:00:00Z"
+    }"#;
+    let record: AgentDefinition =
+        serde_json::from_str(LEGACY).expect("legacy persona should deserialize");
+    assert!(record.capability_policy.is_default());
+
+    let serialized = serde_json::to_string(&record).unwrap();
+    assert!(
+        !serialized.contains("capability_policy"),
+        "re-serialization must not introduce policy bytes: {serialized}"
+    );
+    // Fixed point: parse(serialize(parse(x))) serializes identically — the
+    // new fields never perturb a store written by any build.
+    let reparsed: AgentDefinition = serde_json::from_str(&serialized).unwrap();
+    assert_eq!(serde_json::to_string(&reparsed).unwrap(), serialized);
+}
+
+#[test]
+fn legacy_record_without_policy_bytes_round_trips_without_policy_bytes() {
+    const LEGACY: &str = r#"{
+        "pubkey": "abcd1234",
+        "name": "test-agent",
+        "private_key_nsec": "nsec1fake",
+        "relay_url": "wss://localhost:3000",
+        "acp_command": "buzz-acp",
+        "agent_command": "goose",
+        "agent_args": [],
+        "mcp_command": "",
+        "turn_timeout_seconds": 320,
+        "system_prompt": null,
+        "created_at": "2026-01-01T00:00:00Z",
+        "updated_at": "2026-01-01T00:00:00Z",
+        "last_started_at": null,
+        "last_stopped_at": null,
+        "last_exit_code": null,
+        "last_error": null
+    }"#;
+    let record: ManagedAgentRecord =
+        serde_json::from_str(LEGACY).expect("legacy record should deserialize");
+    assert_eq!(record.capability_policy_override, None);
+    assert!(record.definition_capability_policy.is_default());
+
+    let serialized = serde_json::to_string(&record).unwrap();
+    assert!(
+        !serialized.contains("capability_policy"),
+        "re-serialization must not introduce policy bytes: {serialized}"
+    );
+    let reparsed: ManagedAgentRecord = serde_json::from_str(&serialized).unwrap();
+    assert_eq!(serde_json::to_string(&reparsed).unwrap(), serialized);
+}
+
+#[test]
+fn capability_policy_round_trips_with_grouped_modes() {
+    let policy = AgentCapabilityPolicy {
+        tools: ToolPolicy::Selected {
+            selected: vec![ToolCapabilityId::FilesRead, ToolCapabilityId::ShellExecute],
+        },
+        skills: SkillPolicy::Selected {
+            selected: vec!["buzz-cli".to_string()],
+        },
+    };
+    let json = serde_json::to_string(&policy).unwrap();
+    assert_eq!(
+        json,
+        r#"{"tools":{"mode":"selected","selected":["files.read","shell.execute"]},"skills":{"mode":"selected","selected":["buzz-cli"]}}"#
+    );
+    let parsed: AgentCapabilityPolicy = serde_json::from_str(&json).unwrap();
+    assert_eq!(parsed, policy);
+
+    // A default policy serializes to the empty object and parses back.
+    let default_json = serde_json::to_string(&AgentCapabilityPolicy::default()).unwrap();
+    assert_eq!(default_json, "{}");
+    assert!(serde_json::from_str::<AgentCapabilityPolicy>(&default_json)
+        .unwrap()
+        .is_default());
+}
+
+#[test]
+fn tool_capability_wire_names_are_stable_dotted_strings() {
+    for (variant, wire) in [
+        (ToolCapabilityId::FilesRead, "files.read"),
+        (ToolCapabilityId::FilesWrite, "files.write"),
+        (ToolCapabilityId::CodeSearch, "code.search"),
+        (ToolCapabilityId::CodeIntelligence, "code.intelligence"),
+        (ToolCapabilityId::ShellExecute, "shell.execute"),
+        (ToolCapabilityId::Browser, "browser"),
+        (ToolCapabilityId::WebSearch, "web.search"),
+        (ToolCapabilityId::Subagents, "subagents"),
+        (ToolCapabilityId::TaskTracking, "task.tracking"),
+        (ToolCapabilityId::ImageInspect, "image.inspect"),
+    ] {
+        assert_eq!(variant.as_str(), wire);
+        assert_eq!(
+            serde_json::to_string(&variant).unwrap(),
+            format!("\"{wire}\"")
+        );
+        let parsed: ToolCapabilityId = serde_json::from_str(&format!("\"{wire}\"")).unwrap();
+        assert_eq!(parsed, variant);
+    }
+    // Unknown ids fail closed at deserialization.
+    assert!(serde_json::from_str::<ToolCapabilityId>("\"files.teleport\"").is_err());
+    // The ALL listing covers every variant exactly once.
+    let mut wires: Vec<&str> = ToolCapabilityId::ALL.iter().map(|id| id.as_str()).collect();
+    wires.sort_unstable();
+    wires.dedup();
+    assert_eq!(wires.len(), ToolCapabilityId::ALL.len());
+}
+
+#[test]
+fn update_request_capability_policy_override_is_tri_state() {
+    // Absent = don't touch.
+    let absent: super::UpdateManagedAgentRequest =
+        serde_json::from_str(r#"{"pubkey": "abcd1234"}"#).unwrap();
+    assert_eq!(absent.capability_policy_override, None);
+
+    // null = clear to inherit.
+    let cleared: super::UpdateManagedAgentRequest =
+        serde_json::from_str(r#"{"pubkey": "abcd1234", "capabilityPolicyOverride": null}"#)
+            .unwrap();
+    assert_eq!(cleared.capability_policy_override, Some(None));
+
+    // value = set as the override group.
+    let set: super::UpdateManagedAgentRequest = serde_json::from_str(
+        r#"{"pubkey": "abcd1234", "capabilityPolicyOverride": {"tools": {"mode": "none"}}}"#,
+    )
+    .unwrap();
+    assert_eq!(
+        set.capability_policy_override,
+        Some(Some(AgentCapabilityPolicy {
+            tools: ToolPolicy::None,
+            skills: SkillPolicy::Inherit,
+        }))
     );
 }

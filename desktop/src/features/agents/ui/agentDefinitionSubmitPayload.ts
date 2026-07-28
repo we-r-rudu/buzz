@@ -1,5 +1,3 @@
-import { runtimeSupportsLlmProviderSelection } from "./agentConfigOptions";
-
 /**
  * Pure helper extracted from the `handleSubmit` path of `AgentDefinitionDialog`
  * so the payload logic can be unit-tested without rendering the component.
@@ -14,6 +12,7 @@ export function buildRuntimeModelProviderPayload({
   runtime,
   model,
   provider,
+  supportsProviderSelection,
   isEditMode,
   isAutoSeeded,
   initialPreviousRuntime,
@@ -24,6 +23,9 @@ export function buildRuntimeModelProviderPayload({
   runtime: string;
   model: string;
   provider: string;
+  /** `runtimeSupportsLlmProviderSelection` result for `runtime`, projected
+   *  from the Rust catalog entry by the caller. */
+  supportsProviderSelection: boolean;
   isEditMode: boolean;
   isAutoSeeded: boolean;
   initialPreviousRuntime: string;
@@ -50,8 +52,7 @@ export function buildRuntimeModelProviderPayload({
       isAutoSeededRuntimeForBuiltinEdit) &&
     runtimeForSubmit.length === 0;
   const llmProviderVisibleForSubmit =
-    (runtimeForSubmit.length > 0 &&
-      runtimeSupportsLlmProviderSelection(runtimeForSubmit)) ||
+    (runtimeForSubmit.length > 0 && supportsProviderSelection) ||
     modelProviderEditableWithoutRuntime;
   const shouldPreserveHiddenModelProvider =
     isEditMode &&

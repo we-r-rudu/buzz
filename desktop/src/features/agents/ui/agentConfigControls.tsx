@@ -312,6 +312,47 @@ export function RequiredFieldLabel({
   );
 }
 
+/**
+ * The bordered "Custom ... ID" free-text row shown under a dropdown when the
+ * custom entry is picked. Shared by the definition and instance dialogs so
+ * the shell/control classes stay identical across both.
+ */
+export function CustomFieldInputRow({
+  ariaLabel,
+  disabled,
+  id,
+  onValueChange,
+  placeholder,
+  value,
+}: {
+  ariaLabel: string;
+  disabled?: boolean;
+  id: string;
+  onValueChange: (next: string) => void;
+  placeholder: string;
+  value: string;
+}) {
+  return (
+    <div
+      className={cn(
+        "mt-2 flex min-h-11 items-center px-3",
+        PERSONA_FIELD_SHELL_CLASS,
+      )}
+    >
+      <Input
+        aria-label={ariaLabel}
+        autoCorrect="off"
+        className={cn("h-8 px-0 py-0 leading-6", PERSONA_FIELD_CONTROL_CLASS)}
+        disabled={disabled}
+        id={id}
+        onChange={(event) => onValueChange(event.target.value)}
+        placeholder={placeholder}
+        value={value}
+      />
+    </div>
+  );
+}
+
 export function resolveDefaultModelLabel({
   defaultModelLabel,
   discoveredModelOptions,

@@ -24,6 +24,14 @@
 //!
 //! The hash never crosses a process or persistence boundary, so
 //! `DefaultHasher` (not stable across Rust releases) is sufficient.
+//!
+//! Capability-policy digest subsumption (harness-neutral config, §5/§6): the
+//! policy needs NO dedicated hash input. A skill selection or skill-content
+//! edit changes the COMPOSED prompt, which flows in via `resolved_prompt`
+//! below; a tools/skills flag edit changes the compiled args, which flow in
+//! via `descriptor.args`. Both are already digested, so every policy edit
+//! trips the restart badge while a default (absent) policy hashes identically
+//! to the pre-feature formula.
 
 use std::hash::{DefaultHasher, Hash, Hasher};
 
@@ -82,6 +90,7 @@ pub(crate) fn spawn_config_hash(
                 let args = normalize_agent_args(&cmd, record.agent_args.clone());
                 crate::managed_agents::readiness::EffectiveHarnessDescriptor {
                     command: cmd,
+                    base_args: args.clone(),
                     args,
                     env: Default::default(),
                 }
@@ -120,7 +129,8 @@ pub(crate) fn spawn_config_hash(
             EffectiveConfigResult::Resolved(cfg) => {
                 (cfg.system_prompt.value, cfg.model.value, cfg.provider.value)
             }
-            EffectiveConfigResult::OrphanedInstance { .. } => (None, None, None),
+            EffectiveConfigResult::OrphanedInstance { .. }
+            | EffectiveConfigResult::InvalidPolicy { .. } => (None, None, None),
         };
     resolved_prompt.hash(&mut hasher);
     resolved_model.hash(&mut hasher);

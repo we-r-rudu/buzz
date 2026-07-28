@@ -12,6 +12,12 @@ use super::agent_models_env::env_value;
 use super::agent_models_env::{
     effective_discovery_provider, env_or_process_value, redaction_env_with_value, DiscoveryProvider,
 };
+use super::agent_models_openai::discover_openai_compatible_models;
+#[cfg(test)]
+pub(crate) use super::agent_models_openai::{
+    normalize_openai_compatible_models, openai_compatible_models_url, OpenAiModelListItem,
+    OpenAiModelListResponse,
+};
 use super::agent_update_rollback::{rollback_failed_agent_update, AgentUpdateRollback};
 
 use crate::{
@@ -377,215 +383,6 @@ pub async fn discover_agent_models(
 }
 
 #[derive(Debug, Deserialize)]
-struct OpenAiModelListResponse {
-    data: Vec<OpenAiModelListItem>,
-}
-
-#[derive(Debug, Deserialize)]
-struct OpenAiModelListItem {
-    id: String,
-    #[serde(default)]
-    created: Option<i64>,
-}
-
-fn is_openai_compatible_provider(provider: Option<&str>) -> bool {
-    matches!(
-        provider
-            .map(str::trim)
-            .map(str::to_ascii_lowercase)
-            .as_deref(),
-        Some("openai" | "openai-compat")
-    )
-}
-
-#[cfg(test)]
-fn openai_compatible_models_url(env: &BTreeMap<String, String>) -> String {
-    let base_url = env_value(env, "OPENAI_COMPAT_BASE_URL")
-        .unwrap_or_else(|| "https://api.openai.com/v1".to_string());
-    format!("{}/models", base_url.trim_end_matches('/'))
-}
-
-fn openai_compatible_models_url_for_discovery(env: &BTreeMap<String, String>) -> String {
-    let base_url = env_or_process_value(env, "OPENAI_COMPAT_BASE_URL")
-        .unwrap_or_else(|| "https://api.openai.com/v1".to_string());
-    format!("{}/models", base_url.trim_end_matches('/'))
-}
-
-fn is_agent_text_model_id(id: &str) -> bool {
-    let lower = id.to_ascii_lowercase();
-    if [
-        "audio",
-        "dall-e",
-        "embedding",
-        "image",
-        "moderation",
-        "realtime",
-        "speech",
-        "transcribe",
-        "tts",
-        "whisper",
-    ]
-    .iter()
-    .any(|needle| lower.contains(needle))
-    {
-        return false;
-    }
-
-    lower.starts_with("gpt-") || lower.starts_with('o') || lower.starts_with("chatgpt-")
-}
-
-fn openai_dated_snapshot_alias(id: &str) -> Option<String> {
-    let (base, date) = id.rsplit_once('-')?;
-    if date.len() != 2 || !date.chars().all(|character| character.is_ascii_digit()) {
-        return None;
-    }
-    let (base, month) = base.rsplit_once('-')?;
-    if month.len() != 2 || !month.chars().all(|character| character.is_ascii_digit()) {
-        return None;
-    }
-    let (base, year) = base.rsplit_once('-')?;
-    if year.len() != 4 || !year.chars().all(|character| character.is_ascii_digit()) {
-        return None;
-    }
-
-    Some(base.to_string())
-}
-
-fn openai_model_display_name(id: &str) -> String {
-    let canonical = openai_dated_snapshot_alias(id).unwrap_or_else(|| id.to_string());
-    if let Some(rest) = canonical.strip_prefix("chatgpt-") {
-        return format!("ChatGPT {}", title_case_model_suffix(rest));
-    }
-    if let Some(rest) = canonical.strip_prefix("gpt-") {
-        return format!("GPT-{}", title_case_model_suffix(rest));
-    }
-
-    canonical
-}
-
-fn title_case_model_suffix(value: &str) -> String {
-    value
-        .split('-')
-        .enumerate()
-        .map(|(index, part)| {
-            let part = if part.eq_ignore_ascii_case("pro") {
-                "Pro".to_string()
-            } else if part.eq_ignore_ascii_case("mini") {
-                "mini".to_string()
-            } else if part.eq_ignore_ascii_case("nano") {
-                "nano".to_string()
-            } else {
-                part.to_string()
-            };
-
-            if index == 0 {
-                part
-            } else {
-                format!(" {part}")
-            }
-        })
-        .collect::<String>()
-}
-
-fn normalize_openai_compatible_models(
-    response: OpenAiModelListResponse,
-    provider: Option<&str>,
-) -> Vec<AgentModelInfo> {
-    let mut seen = HashSet::new();
-    let mut items = response.data;
-    let filter_to_openai_text_models = matches!(
-        provider
-            .map(str::trim)
-            .map(str::to_ascii_lowercase)
-            .as_deref(),
-        Some("openai")
-    );
-    let all_ids = items
-        .iter()
-        .map(|item| item.id.clone())
-        .collect::<HashSet<String>>();
-    items.sort_by(|left, right| {
-        right
-            .created
-            .cmp(&left.created)
-            .then_with(|| left.id.cmp(&right.id))
-    });
-
-    items
-        .into_iter()
-        .filter(|item| !filter_to_openai_text_models || is_agent_text_model_id(&item.id))
-        .filter(|item| match openai_dated_snapshot_alias(&item.id) {
-            Some(alias) if filter_to_openai_text_models => !all_ids.contains(&alias),
-            Some(_) | None => true,
-        })
-        .filter(|item| seen.insert(item.id.clone()))
-        .map(|item| AgentModelInfo {
-            name: Some(openai_model_display_name(&item.id)),
-            id: item.id,
-            description: None,
-        })
-        .collect()
-}
-
-async fn discover_openai_compatible_models(
-    client: &reqwest::Client,
-    provider: &DiscoveryProvider,
-    env: &BTreeMap<String, String>,
-    selected_model: Option<String>,
-) -> Result<Option<AgentModelsResponse>, String> {
-    let relay_mesh =
-        provider.as_deref().map(str::trim) == Some(crate::managed_agents::RELAY_MESH_PROVIDER_ID);
-    if !relay_mesh && !is_openai_compatible_provider(provider.as_deref()) {
-        return Ok(None);
-    }
-
-    let api_key = if relay_mesh {
-        crate::managed_agents::RELAY_MESH_API_KEY_PLACEHOLDER.to_string()
-    } else {
-        match provider.required_env(env, "OPENAI_COMPAT_API_KEY")? {
-            Some(api_key) => api_key,
-            None => return Ok(None),
-        }
-    };
-    let redaction_env = redaction_env_with_value(env, "OPENAI_COMPAT_API_KEY", &api_key);
-    let url = if relay_mesh {
-        format!("{}/models", crate::managed_agents::RELAY_MESH_API_BASE_URL)
-    } else {
-        openai_compatible_models_url_for_discovery(env)
-    };
-    let response = client
-        .get(&url)
-        .bearer_auth(&api_key)
-        .send()
-        .await
-        .map_err(|error| format!("OpenAI model discovery request failed: {error}"))?;
-    let status = response.status();
-    if !status.is_success() {
-        let body = response.text().await.unwrap_or_default();
-        let body = crate::managed_agents::redact_env_values_in(&body, &redaction_env);
-        return Err(format!("OpenAI model discovery HTTP {status}: {body}"));
-    }
-
-    let response = response
-        .json::<OpenAiModelListResponse>()
-        .await
-        .map_err(|error| format!("OpenAI model discovery response parse failed: {error}"))?;
-    let models = normalize_openai_compatible_models(response, provider.as_deref());
-    if models.is_empty() {
-        return Err("OpenAI model discovery returned no compatible text models".to_string());
-    }
-
-    Ok(Some(AgentModelsResponse {
-        agent_name: provider.as_deref().unwrap_or("openai").trim().to_string(),
-        agent_version: "models-api".to_string(),
-        models,
-        agent_default_model: None,
-        selected_model,
-        supports_switching: true,
-    }))
-}
-
-#[derive(Debug, Deserialize)]
 struct AnthropicModelListResponse {
     data: Vec<AnthropicModelListItem>,
     #[serde(default)]
@@ -852,6 +649,39 @@ fn apply_model_provider_prompt_update(
     }
 }
 
+/// Pure redeploy decision: a provider-backed agent that has already been
+/// deployed (`backend_agent_id` present) must be redeployed after an edit —
+/// the provider is otherwise still running the create-time payload (HC-005).
+/// Extracted so the decision is unit-testable without an `AppHandle`.
+fn provider_redeploy_target(
+    record: &crate::managed_agents::ManagedAgentRecord,
+) -> Option<(String, serde_json::Value, Option<String>)> {
+    match (&record.backend, &record.backend_agent_id) {
+        (crate::managed_agents::BackendKind::Provider { id, config }, Some(_)) => Some((
+            id.clone(),
+            config.clone(),
+            record.provider_binary_path.clone(),
+        )),
+        _ => None,
+    }
+}
+
+/// Pure half of the Phase-3 failure path: stamp `Redeploy required: {error}`
+/// onto the record (the UI must never report success while the VPS runs
+/// stale config) and return the message the command fails with.
+fn stamp_redeploy_required(
+    records: &mut [crate::managed_agents::ManagedAgentRecord],
+    pubkey: &str,
+    error: &str,
+) -> String {
+    let message = format!("Redeploy required: {error}");
+    if let Some(rec) = records.iter_mut().find(|r| r.pubkey == pubkey) {
+        rec.last_error = Some(message.clone());
+        rec.updated_at = now_iso();
+    }
+    message
+}
+
 /// Update mutable fields on an existing managed agent record.
 ///
 /// Does NOT auto-restart the agent. Runtime config changes (system prompt,
@@ -979,6 +809,73 @@ pub async fn update_managed_agent(
             record.respond_to_allowlist = prospective_allowlist;
         }
 
+        // Capability policy override: tri-state — absent = don't touch,
+        // null = clear to inherit the definition (or defaults), value =
+        // validate and set as one group.
+        if let Some(policy_update) = input.capability_policy_override {
+            match policy_update {
+                Some(mut policy) => {
+                    crate::managed_agents::validate_capability_policy(&policy)?;
+                    crate::managed_agents::normalize_capability_policy(&mut policy);
+                    record.capability_policy_override = Some(policy);
+                }
+                None => {
+                    record.capability_policy_override = None;
+                }
+            }
+        }
+        // Save-time compatibility against the prospective effective command
+        // (post-patch, so a same-request harness switch is judged correctly).
+        // The EFFECTIVE policy is checked — a linked instance inherits its
+        // definition's policy, so switching its harness to a runtime that
+        // cannot honor the definition's policy is blocked here too (HC-003);
+        // the spawn descriptor's typed Err remains the backstop.
+        {
+            let personas = load_personas(&app).unwrap_or_default();
+            let global = crate::managed_agents::load_global_agent_config(&app).unwrap_or_default();
+            let resolved =
+                crate::managed_agents::effective_config::resolve_effective_capability_policy(
+                    record, &personas, &global,
+                );
+            if !resolved.policy.is_default() {
+                let prospective_command =
+                    crate::managed_agents::record_agent_command(record, &personas);
+                // SPEC-R2-002: validate against the capability transport
+                // resolved by runtime IDENTITY — a custom harness id whose
+                // command collides with a builtin maps to the unmapped arm
+                // (named §11.3 error), never the builtin's transport.
+                crate::managed_agents::capability_compiler::validate_policy_against_record(
+                    &resolved.policy,
+                    record,
+                    &personas,
+                    &prospective_command,
+                )?;
+                // SPEC-001 defense in depth: a hand-typed capability flag in
+                // Advanced arguments conflicts with the structured policy
+                // exactly as at the descriptor seam — fail at save, not at
+                // the next spawn. Scoped to verified transports by the guard
+                // itself (custom runtimes are never guarded); resolved by the
+                // same identity rule so a colliding custom is not mistaken
+                // for the builtin.
+                crate::managed_agents::capability_compiler::raw_capability_flag_conflict(
+                    crate::managed_agents::capability_compiler::capability_transport_runtime(
+                        record,
+                        &personas,
+                        &prospective_command,
+                    ),
+                    &resolved.policy,
+                    &record.agent_args,
+                )?;
+            }
+            // SPEC-004: the composed base-prompt + skill-sections cap holds
+            // on every save path, even when neither prompt nor policy was
+            // part of this update — spawn/deploy would refuse the over-cap
+            // composition later (failure at the wrong boundary).
+            crate::managed_agents::effective_config::validate_effective_composed_prompt(
+                record, &personas, &global,
+            )?;
+        }
+
         record.updated_at = now_iso();
 
         save_managed_agents(&app, &records)?;
@@ -1055,6 +952,63 @@ pub async fn update_managed_agent(
             return Err(format!(
                 "Agent rename failed because its relay profile could not be updated. No changes were saved: {sync_error}"
             ));
+        }
+    }
+
+    // Phase 3: redeploy-on-edit for provider-backed agents (HC-005). The
+    // provider runs the payload deployed at create; an edit that never
+    // redeploys would leave the VPS running stale config while the UI claims
+    // success. `deploy_to_provider` is idempotent — providers handle
+    // update-in-place (see its doc comment).
+    let redeploy = {
+        let _store_guard = state
+            .managed_agents_store_lock
+            .lock()
+            .map_err(|e| e.to_string())?;
+        let records = load_managed_agents(&app)?;
+        let record = records
+            .iter()
+            .find(|r| r.pubkey == summary.pubkey)
+            .ok_or_else(|| format!("agent {} not found", summary.pubkey))?;
+        provider_redeploy_target(record)
+    };
+    if let Some((provider_id, provider_config, cached_binary_path)) = redeploy {
+        let redeploy_result = async {
+            let agent_json = {
+                let _store_guard = state
+                    .managed_agents_store_lock
+                    .lock()
+                    .map_err(|e| e.to_string())?;
+                let records = load_managed_agents(&app)?;
+                let record = records
+                    .iter()
+                    .find(|r| r.pubkey == summary.pubkey)
+                    .ok_or_else(|| format!("agent {} not found", summary.pubkey))?;
+                super::agents::build_deploy_payload(&app, &state, record)?
+            };
+            super::agents::deploy_to_provider(
+                &app,
+                &state,
+                &summary.pubkey,
+                &provider_id,
+                &provider_config,
+                agent_json,
+                cached_binary_path.as_deref(),
+            )
+            .await
+        }
+        .await;
+        if let Err(e) = redeploy_result {
+            // Record stays saved; stamp the redeploy requirement so the UI
+            // surfaces it instead of reporting success over stale config.
+            let _store_guard = state
+                .managed_agents_store_lock
+                .lock()
+                .map_err(|e| e.to_string())?;
+            let mut records = load_managed_agents(&app)?;
+            let message = stamp_redeploy_required(&mut records, &summary.pubkey, &e);
+            save_managed_agents(&app, &records)?;
+            return Err(message);
         }
     }
 

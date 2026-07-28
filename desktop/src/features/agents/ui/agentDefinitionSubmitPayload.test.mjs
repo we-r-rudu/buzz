@@ -10,6 +10,8 @@ const BUILTIN_EDIT_BASE = {
   initialModel: null,
   initialProvider: null,
   initialModelProviderEditableWithoutRuntime: false,
+  // buzz-agent/builtin scenarios are provider-capable (catalog projection).
+  supportsProviderSelection: true,
 };
 
 // ── edit-untouched ─────────────────────────────────────────────────────────────

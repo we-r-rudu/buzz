@@ -306,6 +306,8 @@ mod tests {
             definition_respond_to: None,
             definition_respond_to_allowlist: vec![],
             definition_parallelism: None,
+            definition_capability_policy: Default::default(),
+            capability_policy_override: None,
             relay_mesh: None,
         }
     }

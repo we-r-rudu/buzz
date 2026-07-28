@@ -30,6 +30,7 @@ import {
   PERSONA_FIELD_CONTROL_CLASS,
   PERSONA_FIELD_SHELL_CLASS,
   resetConfigForHarnessChange,
+  runtimeSupportsLlmProviderSelection,
   sortPersonaRuntimes,
 } from "@/features/agents/ui/agentConfigOptions";
 import { AgentDropdownSelect } from "@/features/agents/ui/agentConfigControls";
@@ -185,7 +186,15 @@ export function AgentDefaultsEditor({
   }
 
   function handleHarnessChange(runtimeId: string) {
-    handleConfigChange(resetConfigForHarnessChange(config, runtimeId));
+    handleConfigChange(
+      resetConfigForHarnessChange(
+        config,
+        runtimeId,
+        runtimeSupportsLlmProviderSelection(
+          sortedRuntimes.find((runtime) => runtime.id === runtimeId),
+        ),
+      ),
+    );
     setConfigIsValid(false);
     setIsCustomModelEditing(false);
     setIsCustomProvider(false);

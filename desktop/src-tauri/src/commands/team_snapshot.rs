@@ -135,6 +135,7 @@ fn definition_from_snapshot(
         respond_to,
         respond_to_allowlist: behavior.respond_to_allowlist,
         parallelism: behavior.parallelism,
+        capability_policy: Default::default(),
         created_at: now.to_string(),
         updated_at: now.to_string(),
     })
@@ -604,6 +605,8 @@ pub async fn confirm_team_snapshot_import(
             definition_respond_to: respond_to_wire.clone(),
             definition_respond_to_allowlist: definition.respond_to_allowlist.clone(),
             definition_parallelism: minted_parallelism,
+            definition_capability_policy: Default::default(),
+            capability_policy_override: None,
             relay_mesh: None,
             runtime: member.definition.runtime.clone(),
             name_pool: member.definition.name_pool.clone(),

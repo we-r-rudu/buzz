@@ -2,6 +2,7 @@
 //! `reader.rs` stays under the 1000-line budget; `#[path]`-included from
 //! there).
 
+use crate::managed_agents::CapabilityTransport;
 use std::{collections::BTreeMap, path::Path, sync::Mutex};
 
 use super::*;
@@ -59,6 +60,8 @@ fn test_runtime() -> &'static KnownAcpRuntime {
         required_normalized_fields: &["model", "provider"],
         login_hint: None,
         auth_probe_args: None,
+        provider_selection: true,
+        capability_transport: CapabilityTransport::HARNESS_MANAGED,
     }
 }
 
@@ -111,6 +114,8 @@ fn test_record() -> ManagedAgentRecord {
         definition_respond_to: None,
         definition_respond_to_allowlist: Vec::new(),
         definition_parallelism: None,
+        definition_capability_policy: Default::default(),
+        capability_policy_override: None,
         relay_mesh: None,
         agent_command_override: None,
         persona_source_version: None,
@@ -671,6 +676,8 @@ fn buzz_agent_runtime() -> &'static KnownAcpRuntime {
         required_normalized_fields: &["model", "provider"],
         login_hint: None,
         auth_probe_args: None,
+        provider_selection: true,
+        capability_transport: CapabilityTransport::HARNESS_MANAGED,
     }
 }
 

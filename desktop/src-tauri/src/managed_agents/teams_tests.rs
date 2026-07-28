@@ -210,6 +210,8 @@ fn managed_agent(name: &str) -> ManagedAgentRecord {
         is_active: true,
         source_team: None,
         source_team_persona_slug: None,
+        definition_capability_policy: Default::default(),
+        capability_policy_override: None,
         relay_mesh: None,
         definition_respond_to: None,
         definition_respond_to_allowlist: vec![],

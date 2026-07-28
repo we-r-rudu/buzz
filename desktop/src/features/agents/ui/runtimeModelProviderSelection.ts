@@ -54,6 +54,7 @@ export function selectionOnRuntimeChange(
       model: current.model,
       provider: current.provider,
       runtime: params.nextRuntime,
+      supportsProviderSelection: params.nextRuntimeCanChooseProvider,
     })
   ) {
     next.model = "";
@@ -87,6 +88,9 @@ export function selectionOnProviderDropdownChange(
      * key is not yet filled (model discovery cannot run without it).
      */
     clearModelWhenApiKeyMissing: boolean;
+    /** `runtimeSupportsLlmProviderSelection` result for `runtime`, projected
+     *  from the Rust catalog entry by the caller. */
+    runtimeCanChooseProvider: boolean;
   },
 ): RuntimeModelProviderSelection {
   const next = { ...current };
@@ -127,6 +131,7 @@ export function selectionOnProviderDropdownChange(
       model: current.model,
       provider: nextProvider,
       runtime: params.runtime,
+      supportsProviderSelection: params.runtimeCanChooseProvider,
     })
   ) {
     next.model = "";

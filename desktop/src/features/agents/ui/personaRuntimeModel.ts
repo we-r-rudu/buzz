@@ -1,3 +1,5 @@
+import type { AcpRuntimeCatalogEntry, ManagedAgent } from "@/shared/api/types";
+
 /** Runtime provider-capability tri-state used by the submit path. */
 export type ProviderRuntimeCapability = "capable" | "locked" | "unknown";
 
@@ -300,4 +302,28 @@ export function envVarsEqual(
     aKeys.length === Object.keys(b).length &&
     aKeys.every((key) => a[key] === b[key])
   );
+}
+
+/**
+ * Resolve the catalog runtime id to seed the selector with (SPEC-R2-002):
+ * by runtime IDENTITY — the record's runtime id, else the linked persona's —
+ * before falling back to command matching. A custom harness whose command
+ * collides with a builtin must seed its OWN catalog entry; command matching
+ * would borrow the builtin's row (and its capability facts). A stored
+ * override pin has no persisted identity (only the command), so pinned
+ * agents keep command matching.
+ */
+export function matchCatalogRuntimeId(
+  runtimes: AcpRuntimeCatalogEntry[],
+  agent: ManagedAgent,
+  personaRuntimeId: string | null | undefined,
+): string {
+  const identityId = agent.agentCommandOverride
+    ? undefined
+    : agent.runtime?.trim() || personaRuntimeId?.trim() || undefined;
+  const matched =
+    (identityId ? runtimes.find((r) => r.id === identityId) : undefined) ??
+    runtimes.find((r) => r.command?.trim() === agent.agentCommand.trim()) ??
+    runtimes.find((r) => r.id === agent.agentCommand.trim());
+  return matched ? matched.id : "custom";
 }

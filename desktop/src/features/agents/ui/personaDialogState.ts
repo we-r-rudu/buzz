@@ -1,4 +1,5 @@
 import type {
+  AgentCapabilityPolicy,
   AgentPersona,
   CreatePersonaInput,
   PersonaBehaviorInput,
@@ -75,6 +76,7 @@ export function duplicatePersonaDialogState(
       namePool: persona.namePool ?? [],
       envVars: persona.envVars ?? {},
       ...behaviorEntry(persona),
+      ...capabilityPolicyEntry(persona),
     },
   };
 }
@@ -102,6 +104,23 @@ function behaviorEntry(
   };
 }
 
+/**
+ * Seed the dialog capability-policy group from a stored persona, same
+ * spread-in contract as {@link behaviorEntry}: a policy-less persona yields
+ * no key (default draft), a policy-bearing one seeds the stored group so it
+ * is VISIBLE in the editor — and resettable (SPEC-R2-001: the §9 rollback
+ * must reach stored non-default policies, and a policy the dialog never
+ * loads could neither be seen nor cleared).
+ */
+function capabilityPolicyEntry(
+  persona: AgentPersona,
+): { capabilityPolicy: AgentCapabilityPolicy } | Record<string, never> {
+  if (persona.capabilityPolicy == null) {
+    return {};
+  }
+  return { capabilityPolicy: persona.capabilityPolicy };
+}
+
 export function editPersonaDialogState(
   persona: AgentPersona,
 ): PersonaDialogState {
@@ -124,6 +143,7 @@ export function editPersonaDialogState(
       namePool: persona.namePool ?? [],
       envVars: persona.envVars ?? {},
       ...behaviorEntry(persona),
+      ...capabilityPolicyEntry(persona),
     },
   };
 }

@@ -400,6 +400,7 @@ fn model_discovery_ignores_stale_record_for_linked_agent() {
         respond_to: None,
         respond_to_allowlist: Vec::new(),
         parallelism: None,
+        capability_policy: Default::default(),
         created_at: "".to_string(),
         updated_at: "".to_string(),
     };
@@ -587,4 +588,91 @@ fn model_discovery_error_converts_dangling_sentinel_to_sentence() {
     // Non-dangling errors pass through untouched.
     let plain = model_discovery_error("agent-pk", "plain failure");
     assert_eq!(plain, "cannot discover models for agent-pk: plain failure");
+}
+
+// ── Redeploy-on-edit (HC-005, §7) ────────────────────────────────────────────
+
+fn provider_record(deployed: bool) -> crate::managed_agents::ManagedAgentRecord {
+    let mut record: crate::managed_agents::ManagedAgentRecord = serde_json::from_str(
+        r#"{
+            "pubkey": "abcd1234",
+            "name": "test-agent",
+            "private_key_nsec": "nsec1fake",
+            "relay_url": "wss://localhost:3000",
+            "acp_command": "buzz-acp",
+            "agent_command": "goose",
+            "agent_args": [],
+            "mcp_command": "",
+            "turn_timeout_seconds": 320,
+            "system_prompt": null,
+            "created_at": "2026-01-01T00:00:00Z",
+            "updated_at": "2026-01-01T00:00:00Z",
+            "last_started_at": null,
+            "last_stopped_at": null,
+            "last_exit_code": null,
+            "last_error": null,
+            "backend": { "type": "provider", "id": "blox", "config": { "k": "v" } }
+        }"#,
+    )
+    .expect("provider record");
+    if deployed {
+        record.backend_agent_id = Some("backend-1".to_string());
+    }
+    record
+}
+
+#[test]
+fn redeploy_target_only_for_deployed_provider_agents() {
+    // Deployed provider agent → redeploy target with id/config.
+    let (id, _config, _path) =
+        provider_redeploy_target(&provider_record(true)).expect("deployed provider redeploys");
+    assert_eq!(id, "blox");
+    // Provider agent never deployed → no redeploy (nothing running remotely).
+    assert!(provider_redeploy_target(&provider_record(false)).is_none());
+    // Local agent → no redeploy.
+    let mut local = provider_record(true);
+    local.backend = crate::managed_agents::BackendKind::Local;
+    assert!(provider_redeploy_target(&local).is_none());
+}
+
+#[test]
+fn redeploy_failure_stamps_prefixed_last_error() {
+    let mut records = vec![provider_record(true)];
+    let message = stamp_redeploy_required(&mut records, "abcd1234", "provider exploded");
+    assert_eq!(message, "Redeploy required: provider exploded");
+    // The record stays saved with the surfaced error — the UI must not
+    // report success while the VPS runs stale config.
+    assert_eq!(
+        records[0].last_error.as_deref(),
+        Some("Redeploy required: provider exploded")
+    );
+    // Unknown pubkey → message still returned, nothing stamped.
+    let mut records = vec![provider_record(true)];
+    let message = stamp_redeploy_required(&mut records, "nope", "x");
+    assert!(records[0].last_error.is_none());
+    assert_eq!(message, "Redeploy required: x");
+}
+
+#[test]
+fn redeploy_stamp_carries_the_provider_gate_message() {
+    // round2-general-003 + HC-005 composition: when the §7 release gate
+    // refuses a redeploy (a definition-level policy inherited after
+    // creation), update_managed_agent stamps `Redeploy required: {gate
+    // error}` so the UI never reports success while the VPS runs stale
+    // config.
+    let gate_error = crate::commands::agents::provider_capability_gate_error(
+        &crate::managed_agents::AgentCapabilityPolicy {
+            tools: crate::managed_agents::ToolPolicy::HarnessDefault,
+            skills: crate::managed_agents::SkillPolicy::None,
+        },
+    )
+    .expect("a non-default policy trips the gate");
+    let mut records = vec![provider_record(true)];
+    let message = stamp_redeploy_required(&mut records, "abcd1234", &gate_error);
+    assert!(message.starts_with("Redeploy required: "), "{message}");
+    assert!(
+        message.contains(crate::commands::agents::PROVIDER_CAPABILITY_GATE_MESSAGE),
+        "{message}"
+    );
+    assert_eq!(records[0].last_error.as_deref(), Some(message.as_str()));
 }

@@ -607,7 +607,12 @@ fn find_thinking_config_id(cache: Option<&SessionConfigCache>) -> Option<String>
     cache.and_then(|c| {
         c.config_options
             .iter()
-            .find(|o| matches!(o.category.as_deref(), Some("effort") | Some("thought_level")))
+            .find(|o| {
+                matches!(
+                    o.category.as_deref(),
+                    Some("effort") | Some("thought_level")
+                )
+            })
             .map(|o| o.config_id.clone())
     })
 }

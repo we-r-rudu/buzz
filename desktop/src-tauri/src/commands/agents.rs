@@ -4,10 +4,10 @@ use tauri::{AppHandle, State};
 use crate::{
     app_state::AppState,
     managed_agents::{
-        build_managed_agent_summary, current_instance_id, discover_provider_candidates,
-        ensure_persona_is_active, find_managed_agent_mut, load_managed_agents, load_personas,
-        load_teams, managed_agent_avatar_url, managed_agents_base_dir, normalize_agent_args,
-        provider_deploy, resolve_provider_binary, save_managed_agents, start_managed_agent_process,
+        build_managed_agent_summary, current_instance_id, ensure_persona_is_active,
+        find_managed_agent_mut, load_managed_agents, load_personas, load_teams,
+        managed_agent_avatar_url, managed_agents_base_dir, normalize_agent_args,
+        resolve_provider_binary, save_managed_agents, start_managed_agent_process,
         stop_managed_agent_process, stop_managed_agent_workspace_pair,
         sync_managed_agent_processes, try_regenerate_nest, validate_provider_config, BackendKind,
         CreateManagedAgentRequest, CreateManagedAgentResponse, ManagedAgentRecord,
@@ -454,73 +454,6 @@ pub(super) async fn start_local_agent_with_preflight(
     )
 }
 
-/// Deploy an agent to a provider backend. Resolves the binary, calls deploy via
-/// spawn_blocking, and persists the result (backend_agent_id or last_error).
-///
-/// Idempotency: calling deploy on an already-deployed agent sends the same payload
-/// again. Providers are expected to handle this as an update-in-place or no-op —
-/// the protocol does not include an explicit `undeploy` operation (deferred to v2).
-///
-/// Returns Ok(()) on success, Err(message) on failure. Either way the record is
-/// updated and saved before returning.
-async fn deploy_to_provider(
-    app: &AppHandle,
-    state: &AppState,
-    pubkey: &str,
-    provider_id: &str,
-    config: &serde_json::Value,
-    agent_json: serde_json::Value,
-    cached_binary_path: Option<&str>,
-) -> Result<(), String> {
-    // Resolve via discovered candidates only. Cached path must match BOTH
-    // "is a discovered candidate" AND "belongs to this provider_id". A tampered
-    // record cannot redirect deploys to a different provider's binary.
-    let bin_path = cached_binary_path
-        .map(std::path::PathBuf::from)
-        .filter(|p| p.exists())
-        .map(|p| p.canonicalize().unwrap_or(p))
-        .filter(|canonical| {
-            discover_provider_candidates().iter().any(|(id, cp)| {
-                id == provider_id && cp.canonicalize().ok().as_ref() == Some(canonical)
-            })
-        })
-        .map_or_else(|| resolve_provider_binary(provider_id), Ok)?;
-
-    let config_clone = config.clone();
-    let deploy_result =
-        tokio::task::spawn_blocking(move || provider_deploy(&bin_path, &agent_json, &config_clone))
-            .await
-            .map_err(|e| format!("spawn_blocking failed: {e}"))?;
-
-    // Persist result under lock.
-    let _store_guard = state
-        .managed_agents_store_lock
-        .lock()
-        .map_err(|e| e.to_string())?;
-    let mut records = load_managed_agents(app)?;
-    let rec = records
-        .iter_mut()
-        .find(|r| r.pubkey == pubkey)
-        .ok_or_else(|| format!("agent {pubkey} not found"))?;
-
-    match deploy_result {
-        Ok(backend_agent_id) => {
-            rec.backend_agent_id = Some(backend_agent_id);
-            rec.last_started_at = Some(now_iso());
-            rec.updated_at = now_iso();
-            rec.last_error = None;
-        }
-        Err(ref e) => {
-            rec.last_error = Some(e.clone());
-            rec.updated_at = now_iso();
-            save_managed_agents(app, &records)?;
-            return Err(e.clone());
-        }
-    }
-    save_managed_agents(app, &records)?;
-    Ok(())
-}
-
 // Async so the blocking body (disk reads of agent/persona records, per-agent
 // process-liveness syscalls, and a possible save) runs on Tauri's worker pool
 // via spawn_blocking instead of the main UI thread — it was a beachball on the
@@ -607,6 +540,19 @@ pub async fn create_managed_agent(
             "respond-to mode 'allowlist' requires at least one pubkey in the allowlist".to_string(),
         );
     }
+
+    // Capability policy override: validate + normalize before any side
+    // effects. The runtime compatibility check runs once the prospective
+    // command is resolved below — blocked at save (HC-003); the spawn
+    // descriptor error is the backstop.
+    let capability_policy_override = match input.capability_policy.clone() {
+        Some(mut policy) => {
+            crate::managed_agents::validate_capability_policy(&policy)?;
+            crate::managed_agents::normalize_capability_policy(&mut policy);
+            Some(policy)
+        }
+        None => None,
+    };
 
     // Snapshot the workspace owner pubkey for the legacy-record auth_tag
     // fallback. Computed outside the records lock to keep lock ordering simple.
@@ -753,6 +699,13 @@ pub async fn create_managed_agent(
                 .filter(|arg| !arg.is_empty())
                 .collect::<Vec<_>>(),
         );
+
+        // Save-time compatibility of the EFFECTIVE policy runs after the
+        // record is constructed below (SPEC-005): a linked create normally
+        // sends no override and inherits the definition's policy, so checking
+        // only `capability_policy_override` would mint instances guaranteed
+        // to fail at spawn/deploy. The spawn descriptor's typed Err is the
+        // backstop.
 
         // Derive MCP command exclusively from the runtime catalog — the
         // per-record field is never read at spawn time so user-supplied input
@@ -909,6 +862,8 @@ pub async fn create_managed_agent(
             definition_respond_to: None,
             definition_respond_to_allowlist: Vec::new(),
             definition_parallelism: None,
+            definition_capability_policy: Default::default(),
+            capability_policy_override,
             relay_mesh: if effective_provider.as_deref()
                 == Some(crate::managed_agents::RELAY_MESH_PROVIDER_ID)
             {
@@ -919,6 +874,39 @@ pub async fn create_managed_agent(
                 relay_mesh.clone()
             },
         };
+
+        // SPEC-005: validate the EFFECTIVE capability policy — override when
+        // present, else the linked definition's policy — against the
+        // prospective command (a divergent `harness_override` included), so a
+        // create is blocked at save when the inherited policy cannot run
+        // (HC-003). Mirrors the update path's resolved-policy check.
+        {
+            let global = crate::managed_agents::load_global_agent_config(&app).unwrap_or_default();
+            let resolved_policy =
+                crate::managed_agents::effective_config::resolve_effective_capability_policy(
+                    &record, &personas, &global,
+                );
+            if !resolved_policy.policy.is_default() {
+                let prospective_command =
+                    crate::managed_agents::record_agent_command(&record, &personas);
+                // SPEC-R2-002: validate against the capability transport
+                // resolved by runtime IDENTITY — a custom harness id whose
+                // command collides with a builtin maps to the unmapped arm
+                // (named §11.3 error), never the builtin's transport.
+                crate::managed_agents::capability_compiler::validate_policy_against_record(
+                    &resolved_policy.policy,
+                    &record,
+                    &personas,
+                    &prospective_command,
+                )?;
+            }
+            // SPEC-004: the composed base-prompt + skill-sections cap holds
+            // on every save path, even when neither prompt nor policy was
+            // part of this request.
+            crate::managed_agents::effective_config::validate_effective_composed_prompt(
+                &record, &personas, &global,
+            )?;
+        }
 
         records.push(record);
 
@@ -1363,11 +1351,14 @@ pub async fn delete_managed_agent(
 
 #[path = "agents_deploy.rs"]
 mod deploy;
-use deploy::build_deploy_payload;
+pub(crate) use deploy::build_deploy_payload;
 #[cfg(test)]
 use deploy::deploy_payload_json;
+pub(crate) use deploy::deploy_to_provider;
 #[cfg(test)]
 pub(crate) use deploy::resolve_deploy_model_provider;
+#[cfg(test)]
+pub(crate) use deploy::{provider_capability_gate_error, PROVIDER_CAPABILITY_GATE_MESSAGE};
 
 #[path = "agents_profile.rs"]
 mod profile;

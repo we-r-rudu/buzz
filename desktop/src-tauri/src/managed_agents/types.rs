@@ -74,6 +74,10 @@ pub struct AgentDefinition {
     pub respond_to_allowlist: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parallelism: Option<u32>,
+    /// Harness-neutral capability policy (§1.1). Absent-stable (HC-004).
+    /// LAST field so published kind:30175 field order is stable.
+    #[serde(default, skip_serializing_if = "AgentCapabilityPolicy::is_default")]
+    pub capability_policy: AgentCapabilityPolicy,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -135,6 +139,8 @@ impl AgentDefinition {
             definition_respond_to: self.respond_to,
             definition_respond_to_allowlist: self.respond_to_allowlist,
             definition_parallelism: self.parallelism,
+            definition_capability_policy: self.capability_policy,
+            capability_policy_override: None,
             relay_mesh: None,
         }
     }
@@ -167,6 +173,7 @@ impl ManagedAgentRecord {
             respond_to: self.definition_respond_to.clone(),
             respond_to_allowlist: self.definition_respond_to_allowlist.clone(),
             parallelism: self.definition_parallelism,
+            capability_policy: self.definition_capability_policy.clone(),
             created_at: self.created_at.clone(),
             updated_at: self.updated_at.clone(),
         })
@@ -392,6 +399,11 @@ pub struct ManagedAgentRecord {
     pub definition_respond_to_allowlist: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub definition_parallelism: Option<u32>,
+    /// Definition-level capability policy, absorbed from `AgentDefinition`.
+    /// On key-less definition records this IS the definition's policy; on
+    /// instances it stays default and is never read (live resolution, §1.3).
+    #[serde(default, skip_serializing_if = "AgentCapabilityPolicy::is_default")]
+    pub definition_capability_policy: AgentCapabilityPolicy,
     /// Typed marker for relay-mesh agents. `Some(_)` means this agent runs its
     /// inference through Buzz's relay-mesh local endpoint; the `model_ref` is
     /// the served model id to route to. `None` is a normal agent.
@@ -407,6 +419,11 @@ pub struct ManagedAgentRecord {
     /// deserialize as `None`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub relay_mesh: Option<RelayMeshConfig>,
+    /// Optional per-instance capability policy override. `None` = inherit the
+    /// linked definition (or default); `Some` = replace as one validated
+    /// group. Absent-stable: omitted from store and 30177 projection unless set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capability_policy_override: Option<AgentCapabilityPolicy>,
 }
 
 /// Typed relay-mesh configuration carried on a [`ManagedAgentRecord`].
@@ -535,6 +552,10 @@ pub struct ManagedAgentSummary {
     pub log_path: String,
     pub respond_to: RespondTo,
     pub respond_to_allowlist: Vec<String>,
+    /// The instance's capability policy override (`None` = inherit the
+    /// definition/default). Omitted when unset so old fixtures stay valid.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capability_policy_override: Option<AgentCapabilityPolicy>,
 }
 
 #[derive(Debug, Serialize)]
@@ -641,6 +662,14 @@ pub struct AcpRuntimeCatalogEntry {
     /// Skipped in serialization when empty to keep the catalog payload compact.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub definition_env: BTreeMap<String, String>,
+    /// Capability-policy support facts, projected from the runtime metadata
+    /// table for builtins; `harness_managed` with empty id lists for
+    /// preset/custom entries in v1.
+    pub capability_support: RuntimeCapabilitySupport,
+    /// Whether the runtime takes a user-selected LLM provider (drives the
+    /// provider picker). Projected from `KnownAcpRuntime::provider_selection`;
+    /// always `false` for preset/custom entries.
+    pub provider_selection: bool,
 }
 
 /// Result of a single install step (CLI or adapter).
@@ -961,6 +990,8 @@ pub fn resolve_mint_behavioral_defaults(
     })
 }
 
+mod capability_policy;
+pub use capability_policy::*;
 mod requests;
 pub use requests::*;
 

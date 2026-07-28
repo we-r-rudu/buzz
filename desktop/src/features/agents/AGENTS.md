@@ -19,6 +19,14 @@ never maintains a rival copy of this table. Setup guidance follows the same
 rule: `requires_external_cli` is derived from `KnownAcpRuntime` and projected
 to the UI rather than inferred from a runtime ID in a component.
 
+Two facts deserve naming because they used to have rival frontend copies:
+`provider_selection` (whether the LLM-provider picker shows — the old
+`runtimeSupportsLlmProviderSelection` lookup table was deleted; the function
+now takes the catalog entry) and `capability_support` (the
+`RuntimeCapabilitySupport` projection of `KnownAcpRuntime::capability_transport`:
+verified vs harness-managed tool policy, supported/unsupported semantic tool
+ids, `skills_disable`, `ambient_skill_note`).
+
 If you need a new capability fact (a new env key, a native option, a "supports
 X" flag): add it to `KnownAcpRuntime` first, expose it on
 `AcpRuntimeCatalogEntry`, then project it through the core. Do not shortcut
@@ -108,11 +116,38 @@ with a TypeScript lookup table or an id comparison in a component.
    Edit. In Edit,
    selecting Custom command keeps its required command field beside the harness
    picker rather than hiding it in Advanced.
+10. **Capability policy is a portable group with tri-state saves, gated on the
+   catalog.** The definition dialog edits `capabilityPolicy`; the instance
+   edit dialog edits `capabilityPolicyOverride` ("Inherit from definition" is
+   the null-override default and shows the linked definition's policy
+   summary). Both render the shared `CapabilityPolicyFields` over a pure
+   draft (`capabilityPolicyLogic.ts`): switching the harness NEVER mutates
+   the draft — `capabilityCompatibility` names unsupported ids in an
+   aria-live region and blocks Save instead, so switching back restores the
+   selections (HC-003); the backend re-validates at save as the backstop.
+   Submit semantics are hash-quiet tri-states: a definition submits nothing
+   when unchanged, the whole group when changed, and `{}` when reset to
+   defaults; an instance submits nothing when unchanged, `null` to clear to
+   inherit, or the replacement group (`capabilityOverrideForSubmit`). Only
+   runtimes whose catalog transport is `verified` (v1: omp) accept an
+   explicit tool policy — harness-managed runtimes lock the tools fieldset;
+   skill policies deliver as composed prompt sections from the
+   `list_buzz_prompt_skills` catalog (prompt text never leaves Rust).**Release
+   gate:** capability controls are hidden for provider-backed agents
+   (`backend.type !== "local"`) and Save never sends an override for them
+   until the external provider script exports the lossless
+   `BUZZ_ACP_AGENT_ARGS_JSON` transport to the remote buzz-acp.
 
 ## The tests that enforce this
 
 - `lib/agentConfigCore.test.mjs` — field model per harness × scope, clearing
   policy. Update when the capability model changes.
+- `ui/capabilityPolicyLogic.test.mjs` — policy draft ↔ wire round-trips,
+  absent-stable builds, compatibility preview, blocked-switch preservation
+  (HC-003), and both tri-state submit contracts.
+- `desktop/tests/e2e/agent-capability-policy.spec.ts` — keyboard-only mode
+  switch + selection + incompatibility announcement (HC-008), the
+  provider-backed release-gate note, and the definition-dialog render.
 - `ui/agentConfigFieldsContract.test.mjs` — canonical behaviors + disclosure
   presets + `shouldShowModelStatusMessage` status-bypass +
   `shouldRenderModelControl` (successful-empty omit vs failure keep). If this

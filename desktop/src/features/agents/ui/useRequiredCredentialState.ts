@@ -9,7 +9,6 @@ import {
   getBakedSatisfiedEnvKeys,
   isGloballySatisfiedCredentialKey,
   requiredCredentialEnvKeys,
-  runtimeSupportsLlmProviderSelection,
 } from "./agentConfigOptions";
 import { hasMissingRequiredEnvKey } from "./personaRuntimeModel";
 
@@ -49,6 +48,9 @@ export interface RequiredCredentialState {
 export function useRequiredCredentialState(params: {
   open: boolean;
   prospectiveRuntimeId: string;
+  /** `runtimeSupportsLlmProviderSelection` result for `prospectiveRuntimeId`,
+   *  projected from the Rust catalog entry by the caller. */
+  supportsProviderSelection: boolean;
   provider: string;
   /** Global provider default; used as fallback when per-agent provider is empty. */
   globalProvider?: string;
@@ -64,6 +66,7 @@ export function useRequiredCredentialState(params: {
   const {
     open,
     prospectiveRuntimeId,
+    supportsProviderSelection,
     provider,
     globalProvider = "",
     envVars,
@@ -71,9 +74,7 @@ export function useRequiredCredentialState(params: {
     personaEnvVars = {},
   } = params;
 
-  const providerForRequiredKeys = runtimeSupportsLlmProviderSelection(
-    prospectiveRuntimeId,
-  )
+  const providerForRequiredKeys = supportsProviderSelection
     ? provider.trim() || globalProvider.trim()
     : "";
 

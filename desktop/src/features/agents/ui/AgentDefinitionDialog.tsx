@@ -11,8 +11,6 @@ import { cn } from "@/shared/lib/cn";
 import { Button } from "@/shared/ui/button";
 import { ChooserDialogContent } from "@/shared/ui/chooser-dialog-content";
 import { Dialog } from "@/shared/ui/dialog";
-import { Input } from "@/shared/ui/input";
-import { Textarea } from "@/shared/ui/textarea";
 import { AgentCreationPreview } from "./AgentCreationPreview";
 import { PersonaDropdownField } from "./PersonaDropdownField";
 import type { EnvVarsValue } from "./EnvVarsEditor";
@@ -32,6 +30,8 @@ import {
   emptyPersonaBehaviorDraft,
   personaBehaviorDraftValid,
 } from "./personaBehaviorDraft";
+import { DefinitionCapabilityPolicySection } from "./DefinitionCapabilityPolicySection";
+import { PersonaBasicsFields } from "./PersonaBasicsFields";
 import {
   AUTO_MODEL_DROPDOWN_VALUE,
   AUTO_PROVIDER_DROPDOWN_VALUE,
@@ -46,13 +46,11 @@ import {
   NO_RUNTIME_DROPDOWN_VALUE,
   runtimeSupportsLlmProviderSelection,
   type PersonaDropdownOption,
-  PERSONA_FIELD_CONTROL_CLASS,
-  PERSONA_FIELD_SHELL_CLASS,
   PERSONA_LABEL_OPTIONAL_CLASS,
   shouldClearKnownModelForSelectionScope,
   sortPersonaRuntimes,
 } from "./agentConfigOptions";
-import { RequiredFieldLabel } from "./agentConfigControls";
+import { CustomFieldInputRow, RequiredFieldLabel } from "./agentConfigControls";
 import {
   modelDropdownOptions as buildModelDropdownOptions,
   relayMeshModelPickerState,
@@ -83,6 +81,7 @@ import {
 } from "./agentAiConfigurationPolicy";
 import { useProviderApiKeyFieldState } from "./providerApiKeyFieldState";
 import { buildRuntimeModelProviderPayload } from "./agentDefinitionSubmitPayload";
+import { useDefinitionCapabilityPolicy } from "./useDefinitionCapabilityPolicy";
 
 type AgentDefinitionDialogProps = {
   open: boolean;
@@ -102,6 +101,15 @@ type AgentDefinitionDialogProps = {
   createRunSection?: React.ReactNode;
   /** Extra create-mode submit gate (e.g. incomplete provider config). */
   createSubmitBlocked?: boolean;
+  /**
+   * Create mode only: the chosen run destination is provider-backed. The
+   * release gate (§7) replaces the capability controls with a note and
+   * blocks submitting a non-default policy draft — the external provider
+   * script's lossless args transport is not yet verified, so a policy could
+   * be applied lossily on the VPS while the desktop reports success
+   * (SPEC-007/HC-005/HC-006).
+   */
+  createProviderBacked?: boolean;
 };
 
 const ADVANCED_FIELDS_MOTION_TRANSITION = {
@@ -123,6 +131,7 @@ export function AgentDefinitionDialog({
   onSubmit,
   createRunSection,
   createSubmitBlocked = false,
+  createProviderBacked = false,
 }: AgentDefinitionDialogProps) {
   const [displayName, setDisplayName] = React.useState("");
   const [aiDefaultsOpen, setAiDefaultsOpen] = React.useState(false);
@@ -172,6 +181,24 @@ export function AgentDefinitionDialog({
   );
   const isCreateMode = Boolean(initialValues && !("id" in initialValues));
   const shouldReduceMotion = useReducedMotion();
+  const selectedRuntime = runtimes.find((p) => p.id === runtime);
+  const {
+    draft: capabilityDraft,
+    setDraft: setCapabilityDraft,
+    reseed: reseedCapability,
+    reset: resetCapability,
+    support: capabilitySupport,
+    catalogEntryUnresolved,
+    submitBlocked: capabilitySubmitBlocked,
+    skills: capabilitySkills,
+    forSubmit: capabilityForSubmit,
+  } = useDefinitionCapabilityPolicy({
+    runtime,
+    selectedRuntime,
+    isCreateMode,
+    createProviderBacked,
+    open,
+  });
   const initialModelProviderEditableWithoutRuntime = Boolean(
     initialValues &&
       "id" in initialValues &&
@@ -207,6 +234,11 @@ export function AgentDefinitionDialog({
     const nextBehaviorDraft = draftFromBehavior(initialValues.behavior);
     behaviorSeedRef.current = draftFromBehavior(initialValues.behavior);
     setBehaviorDraft(nextBehaviorDraft);
+    reseedCapability(
+      "capabilityPolicy" in initialValues
+        ? initialValues.capabilityPolicy
+        : null,
+    );
     setNamePoolText(nextNamePoolText);
     setEnvVars(nextEnvVars);
     // Advanced always starts collapsed and only changes from its toggle.
@@ -214,7 +246,7 @@ export function AgentDefinitionDialog({
     setIsAvatarUploadPending(false);
     isRuntimeAutoSeededRef.current = false;
     hasSeededForOpenRef.current = false;
-  }, [initialValues, open]);
+  }, [initialValues, open, reseedCapability]);
 
   React.useEffect(() => {
     if (
@@ -295,6 +327,7 @@ export function AgentDefinitionDialog({
       setEnvVars({});
       setBehaviorDraft(emptyPersonaBehaviorDraft);
       behaviorSeedRef.current = emptyPersonaBehaviorDraft;
+      resetCapability();
       setShowAdvancedFields(false);
       setIsAvatarUploadPending(false);
       // isRuntimeAutoSeededRef and hasSeededForOpenRef are NOT reset here — the
@@ -317,6 +350,7 @@ export function AgentDefinitionDialog({
       runtime,
       model: aiConfigurationMode === "defaults" ? "" : model,
       provider: aiConfigurationMode === "defaults" ? "" : provider,
+      supportsProviderSelection: supportsLlmProvider,
       isEditMode: "id" in initialValues,
       isAutoSeeded: isRuntimeAutoSeededRef.current,
       initialPreviousRuntime: initialValues.runtime?.trim() ?? "",
@@ -345,6 +379,7 @@ export function AgentDefinitionDialog({
         behaviorSeedRef.current,
         "id" in initialValues,
       ),
+      capabilityPolicy: capabilityForSubmit("id" in initialValues),
     };
 
     if ("id" in initialValues) {
@@ -363,15 +398,15 @@ export function AgentDefinitionDialog({
     void handleSubmit();
   }
 
-  const selectedRuntime = runtimes.find((p) => p.id === runtime);
+  const supportsLlmProvider =
+    runtimeSupportsLlmProviderSelection(selectedRuntime);
   const blankRuntimeModelProviderEditable =
     initialModelProviderEditableWithoutRuntime && runtime.trim().length === 0;
   const runtimeCanChooseLlmProvider =
-    runtimeSupportsLlmProviderSelection(runtime) ||
-    blankRuntimeModelProviderEditable;
+    supportsLlmProvider || blankRuntimeModelProviderEditable;
   const llmProviderFieldVisible =
-    (runtime.trim().length > 0 && runtimeCanChooseLlmProvider) ||
-    blankRuntimeModelProviderEditable;
+    runtimeCanChooseLlmProvider &&
+    (runtime.trim().length > 0 || blankRuntimeModelProviderEditable);
   const trimmedProvider = provider.trim();
   // Required credential env keys for this runtime + provider combination.
   // Used to show required markers on the LLM provider label and amber
@@ -412,6 +447,7 @@ export function AgentDefinitionDialog({
         model,
         provider: trimmedProvider,
         runtimeId: runtime,
+        supportsProviderSelection: supportsLlmProvider,
         runtimeFileConfig,
       }),
     [
@@ -424,6 +460,7 @@ export function AgentDefinitionDialog({
       trimmedProvider,
       runtime,
       runtimeFileConfig,
+      supportsLlmProvider,
     ],
   );
   // requiredEnvKeys: the gate already handles baked-, global-, and file-
@@ -479,6 +516,8 @@ export function AgentDefinitionDialog({
     (!isCreateMode || runtime.trim().length > 0) &&
     (!isCreateMode || selectedRuntimeIsAvailable) &&
     (!isCreateMode || !createSubmitBlocked) &&
+    // Capability-policy + unresolved-catalog gates (useDefinitionCapabilityPolicy).
+    !capabilitySubmitBlocked &&
     // Crash-loop guard, create AND edit: an empty allowlist would crash
     // every instance minted from this definition at startup.
     personaBehaviorDraftValid(behaviorDraft) &&
@@ -503,15 +542,15 @@ export function AgentDefinitionDialog({
     isCustomProviderEditing,
     modelFieldVisible,
     open,
-    // Gate provider by runtime: runtimes that don't support LLM provider
-    // selection (codex, claude) must not inherit the global provider — doing
-    // so causes them to discover models from the wrong provider.
-    provider: runtimeSupportsLlmProviderSelection(runtime)
-      ? effectiveProvider
-      : "",
+    // Runtimes without provider selection must not inherit the global provider.
+    provider: supportsLlmProvider ? effectiveProvider : "",
     selectedRuntime,
   });
-  const staticModelOptions = getPersonaModelOptions(runtime, effectiveProvider);
+  const staticModelOptions = getPersonaModelOptions(
+    runtime,
+    effectiveProvider,
+    supportsLlmProvider,
+  );
   const runtimeModelOptions = getRuntimePersonaModelOptions(runtime);
   const {
     isCustom: isModelCustom,
@@ -642,6 +681,7 @@ export function AgentDefinitionDialog({
         model,
         provider: effectiveProvider,
         runtime,
+        supportsProviderSelection: supportsLlmProvider,
       })
     ) {
       return;
@@ -656,6 +696,7 @@ export function AgentDefinitionDialog({
     open,
     effectiveProvider,
     runtime,
+    supportsLlmProvider,
   ]);
 
   const selection: RuntimeModelProviderSelection = {
@@ -684,9 +725,9 @@ export function AgentDefinitionDialog({
       selectionOnRuntimeChange(selection, {
         previousRuntime: runtime,
         nextRuntime,
-        nextRuntimeCanChooseProvider:
-          nextRuntime.trim().length > 0 &&
-          runtimeSupportsLlmProviderSelection(nextRuntime),
+        nextRuntimeCanChooseProvider: runtimeSupportsLlmProviderSelection(
+          runtimes.find((p) => p.id === nextRuntime),
+        ),
         lockedRuntimeReset: "full",
       }),
     );
@@ -702,6 +743,8 @@ export function AgentDefinitionDialog({
       runtime: nextProvider === "relay-mesh" ? "buzz-agent" : runtime,
       nextValue,
       clearModelWhenApiKeyMissing: true,
+      runtimeCanChooseProvider:
+        nextProvider === "relay-mesh" ? true : supportsLlmProvider,
     });
     applySelection({
       ...nextSelection,
@@ -775,55 +818,13 @@ export function AgentDefinitionDialog({
           />
 
           <div className="space-y-5">
-            <div className="space-y-1.5">
-              <label
-                className="text-sm font-medium text-foreground"
-                htmlFor="persona-display-name"
-              >
-                Agent name
-              </label>
-              <div
-                className={cn(
-                  "flex min-h-11 items-center px-3",
-                  PERSONA_FIELD_SHELL_CLASS,
-                )}
-              >
-                <Input
-                  autoCorrect="off"
-                  className={cn(
-                    "h-8 px-0 py-0 leading-6",
-                    PERSONA_FIELD_CONTROL_CLASS,
-                  )}
-                  disabled={isPending}
-                  id="persona-display-name"
-                  onChange={(event) => setDisplayName(event.target.value)}
-                  placeholder="Fizz"
-                  value={displayName}
-                />
-              </div>
-            </div>
-
-            <div className="space-y-1.5">
-              <label
-                className="text-sm font-medium text-foreground"
-                htmlFor="persona-system-prompt"
-              >
-                Agent instructions
-              </label>
-              <div className={PERSONA_FIELD_SHELL_CLASS}>
-                <Textarea
-                  className={cn(
-                    "min-h-40 resize-y px-3 py-3 leading-5",
-                    PERSONA_FIELD_CONTROL_CLASS,
-                  )}
-                  disabled={isPending}
-                  id="persona-system-prompt"
-                  onChange={(event) => setSystemPrompt(event.target.value)}
-                  placeholder="Describe what this agent should do."
-                  value={systemPrompt}
-                />
-              </div>
-            </div>
+            <PersonaBasicsFields
+              disabled={isPending}
+              displayName={displayName}
+              onDisplayNameChange={setDisplayName}
+              onSystemPromptChange={setSystemPrompt}
+              systemPrompt={systemPrompt}
+            />
 
             {modelFieldVisible ? (
               <AgentAiConfigurationModeField
@@ -870,26 +871,14 @@ export function AgentDefinitionDialog({
                     value={providerSelectValue}
                   />
                   {showCustomProviderInput ? (
-                    <div
-                      className={cn(
-                        "mt-2 flex min-h-11 items-center px-3",
-                        PERSONA_FIELD_SHELL_CLASS,
-                      )}
-                    >
-                      <Input
-                        aria-label="Custom provider ID"
-                        autoCorrect="off"
-                        className={cn(
-                          "h-8 px-0 py-0 leading-6",
-                          PERSONA_FIELD_CONTROL_CLASS,
-                        )}
-                        disabled={isPending}
-                        id="persona-custom-provider"
-                        onChange={(event) => setProvider(event.target.value)}
-                        placeholder="Custom provider ID"
-                        value={provider}
-                      />
-                    </div>
+                    <CustomFieldInputRow
+                      ariaLabel="Custom provider ID"
+                      disabled={isPending}
+                      id="persona-custom-provider"
+                      onValueChange={setProvider}
+                      placeholder="Custom provider ID"
+                      value={provider}
+                    />
                   ) : null}
                 </div>
               ) : null}
@@ -951,6 +940,17 @@ export function AgentDefinitionDialog({
                 />
               ) : null}
             </div>
+
+            <DefinitionCapabilityPolicySection
+              catalogEntryUnresolved={catalogEntryUnresolved}
+              disabled={isPending}
+              draft={capabilityDraft}
+              harnessSource={selectedRuntime?.source}
+              onDraftChange={setCapabilityDraft}
+              providerBacked={isCreateMode && createProviderBacked}
+              skills={capabilitySkills}
+              support={capabilitySupport}
+            />
 
             <AgentDefaultsDialog
               onOpenChange={setAiDefaultsOpen}

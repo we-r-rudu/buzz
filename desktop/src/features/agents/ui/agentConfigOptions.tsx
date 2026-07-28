@@ -173,14 +173,42 @@ export function isMissingRequiredDropdownField(
   return field?.isRequired === true && value.trim().length === 0;
 }
 
-export function runtimeSupportsLlmProviderSelection(runtimeId: string) {
-  return runtimeId === "buzz-agent" || runtimeId === "goose";
+/**
+ * Whether the runtime takes a user-selected LLM provider (drives the
+ * provider picker). Reads the Rust catalog projection
+ * (`AcpRuntimeCatalogEntry.providerSelection`) — the frontend keeps no rival
+ * table (features/agents/AGENTS.md one rule). A catalog miss (`undefined`)
+ * fails closed to `false`.
+ */
+export function runtimeSupportsLlmProviderSelection(
+  runtime: Pick<AcpRuntimeCatalogEntry, "providerSelection"> | null | undefined,
+): boolean {
+  return runtime?.providerSelection === true;
+}
+
+/**
+ * Whether the definition dialog must block Save because the selected
+ * runtime's catalog entry is unresolved (catalog still loading, the query
+ * errored, or the harness no longer exists). While unresolved the runtime's
+ * capabilities are UNKNOWN — not false (general-003, P0): submitting would
+ * fail closed on provider-selection, and `update_persona` assigns the
+ * provider field verbatim, so even a name-only edit would silently clear
+ * the stored provider and model and republish the clear to every synced
+ * device. The resolved-entry fail-closed behavior for genuinely
+ * harness-managed runtimes is unchanged.
+ */
+export function definitionSaveBlockedForUnresolvedRuntime(
+  runtimeId: string,
+  selectedRuntime: unknown,
+): boolean {
+  return runtimeId.trim().length > 0 && selectedRuntime == null;
 }
 
 /** Clears values whose meaning or support changes with the selected harness. */
 export function resetConfigForHarnessChange(
   config: GlobalAgentConfig,
   runtimeId: string,
+  supportsProviderSelection: boolean,
 ): GlobalAgentConfig {
   const nextEnvVars = { ...config.env_vars };
   delete nextEnvVars[BUZZ_AGENT_THINKING_EFFORT];
@@ -191,8 +219,7 @@ export function resetConfigForHarnessChange(
     model: null,
     preferred_runtime: runtimeId || null,
     provider:
-      runtimeSupportsLlmProviderSelection(runtimeId) &&
-      config.provider !== "relay-mesh"
+      supportsProviderSelection && config.provider !== "relay-mesh"
         ? config.provider
         : null,
   };
@@ -201,11 +228,9 @@ export function resetConfigForHarnessChange(
 function effectiveModelProviderForOptions(
   runtimeId: string,
   providerId: string | null | undefined,
+  supportsProviderSelection: boolean,
 ) {
-  if (
-    runtimeId.trim().length > 0 &&
-    !runtimeSupportsLlmProviderSelection(runtimeId)
-  ) {
+  if (runtimeId.trim().length > 0 && !supportsProviderSelection) {
     return "";
   }
 
@@ -215,11 +240,13 @@ function effectiveModelProviderForOptions(
 export function getPersonaModelOptions(
   runtimeId: string,
   providerId: string | null | undefined,
+  supportsProviderSelection: boolean,
 ): readonly PersonaModelOption[] {
   const options = getRuntimePersonaModelOptions(runtimeId);
   const trimmedProvider = effectiveModelProviderForOptions(
     runtimeId,
     providerId,
+    supportsProviderSelection,
   );
   if (trimmedProvider.length === 0) {
     return options.filter((option) => option.id.length === 0);
@@ -399,13 +426,19 @@ export function shouldClearKnownModelForSelectionScope({
   model,
   provider,
   runtime,
+  supportsProviderSelection,
 }: {
   model: string;
   provider: string | null | undefined;
   runtime: string;
+  supportsProviderSelection: boolean;
 }) {
   const runtimeOptions = getRuntimePersonaModelOptions(runtime);
-  const scopedOptions = getPersonaModelOptions(runtime, provider);
+  const scopedOptions = getPersonaModelOptions(
+    runtime,
+    provider,
+    supportsProviderSelection,
+  );
   return (
     hasExactPersonaModelOption(runtimeOptions, model) &&
     !hasExactPersonaModelOption(scopedOptions, model)
@@ -553,6 +586,7 @@ export function computeLocalModeGate({
   model,
   provider,
   runtimeId,
+  supportsProviderSelection,
   runtimeFileConfig,
 }: {
   /** Optional baked build env key names (Block-internal builds only).
@@ -563,7 +597,7 @@ export function computeLocalModeGate({
   envVars: Record<string, string>;
   /**
    * Global agent config env vars. Required credential keys satisfied here
-   * are excluded from `missingEnvKeys` so global config silences the gate.
+   *  are excluded from `missingEnvKeys` so global config silences the gate.
    */
   globalEnvVars?: Record<string, string>;
   /**
@@ -573,13 +607,16 @@ export function computeLocalModeGate({
   globalProvider?: string;
   /**
    * Global fallback model. When the agent's own model is empty but a global
-   * model is set, the model normalized-field gate is satisfied.
+   *  model is set, the model normalized-field gate is satisfied.
    */
   globalModel?: string;
   isProviderMode: boolean;
   model: string;
   provider: string;
   runtimeId: string;
+  /** `runtimeSupportsLlmProviderSelection` result for `runtimeId`, projected
+   *  from the Rust catalog entry (never recomputed from the id here). */
+  supportsProviderSelection: boolean;
   /** Optional file-layer config for the runtime (e.g. goose config.yaml).
    *  When provided, requirements already satisfied there are silenced. */
   runtimeFileConfig?: RuntimeFileConfigSubset | null;
@@ -617,7 +654,7 @@ export function computeLocalModeGate({
     };
   }
 
-  const needsProviderSelection = runtimeSupportsLlmProviderSelection(runtimeId);
+  const needsProviderSelection = supportsProviderSelection;
 
   // File-layer values for goose-style runtimes. These silence requirements
   // when the runtime config file provides the value — the file layer is the

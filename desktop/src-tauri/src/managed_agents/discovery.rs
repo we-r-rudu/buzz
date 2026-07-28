@@ -12,15 +12,17 @@ use crate::managed_agents::{
 
 mod runtime_metadata;
 
+pub(crate) use runtime_metadata::CapabilityFlagPlacement;
+#[cfg(test)]
+pub(crate) use runtime_metadata::CapabilityToolMapping;
+#[cfg(test)]
+pub(crate) use runtime_metadata::CapabilityTransport;
 pub(crate) use runtime_metadata::KnownAcpRuntime;
-
-const GOOSE_AVATAR_URL: &str = "https://goose-docs.ai/img/logo_dark.png";
-const CLAUDE_CODE_AVATAR_URL: &str = "https://anthropic.gallerycdn.vsassets.io/extensions/anthropic/claude-code/2.1.77/1773707456892/Microsoft.VisualStudio.Services.Icons.Default";
-const CODEX_AVATAR_URL: &str = "https://openai.gallerycdn.vsassets.io/extensions/openai/chatgpt/26.5313.41514/1773706730621/Microsoft.VisualStudio.Services.Icons.Default";
-const BUZZ_AGENT_AVATAR_URL: &str =
-    "https://raw.githubusercontent.com/block/buzz/refs/heads/main/crates/buzz-agent/buzz-agent.png";
-const OMP_AVATAR_URL: &str =
-    "https://raw.githubusercontent.com/can1357/oh-my-pi/main/assets/icon.svg";
+#[cfg(test)]
+pub(crate) use runtime_metadata::EMPTY_RUNTIME;
+use runtime_metadata::KNOWN_ACP_RUNTIMES;
+#[cfg(test)]
+pub(crate) use runtime_metadata::VERIFIED_FIXTURE_TRANSPORT;
 
 fn common_binary_paths() -> &'static [PathBuf] {
     static PATHS: OnceLock<Vec<PathBuf>> = OnceLock::new();
@@ -72,178 +74,6 @@ fn common_binary_paths() -> &'static [PathBuf] {
     })
 }
 
-const KNOWN_ACP_RUNTIMES: &[KnownAcpRuntime] = &[
-    KnownAcpRuntime {
-        id: "goose",
-        label: "Goose",
-        commands: &["goose"],
-        aliases: &[],
-        avatar_url: GOOSE_AVATAR_URL,
-        mcp_command: None,
-        mcp_hooks: false,
-        underlying_cli: Some("goose"),
-        cli_install_commands: &["curl -fsSL https://github.com/aaif-goose/goose/releases/download/stable/download_cli.sh | CONFIGURE=false bash"],
-        // Goose's stable release currently publishes only the Unix installer;
-        // its official Windows instructions intentionally point at this main-branch script.
-        cli_install_commands_windows: &["powershell.exe -NoProfile -ExecutionPolicy Bypass -Command \"$env:CONFIGURE='false'; irm https://raw.githubusercontent.com/aaif-goose/goose/main/download_cli.ps1 | iex\""],
-        adapter_install_commands: &[],
-        cli_install_instructions_url: "https://goose-docs.ai/docs/getting-started/installation/",
-        adapter_install_instructions_url: "",
-        cli_install_hint: "Buzz talks to Goose through the Goose CLI.",
-        adapter_install_hint: "",
-        skill_dir: Some(".goose/skills"),
-        supports_acp_model_switching: false,
-        model_env_var: Some("GOOSE_MODEL"),
-        provider_env_var: Some("GOOSE_PROVIDER"),
-        provider_locked: false,
-        default_env: &[("GOOSE_MODE", "auto")],
-        config_file_path: Some("~/.config/goose/config.yaml"),
-        config_file_format: Some("yaml"),
-        supports_acp_native_config: true,
-        thinking_env_var: Some("GOOSE_THINKING_EFFORT"),
-        max_tokens_env_var: Some("GOOSE_MAX_TOKENS"),
-        context_limit_env_var: Some("GOOSE_CONTEXT_LIMIT"),
-        required_normalized_fields: &["model", "provider"],
-        login_hint: None,
-        auth_probe_args: None,
-    },
-    KnownAcpRuntime {
-        id: "claude",
-        label: "Claude Code",
-        commands: &["claude-agent-acp", "claude-code-acp"],
-        aliases: &["claude-code", "claudecode"],
-        avatar_url: CLAUDE_CODE_AVATAR_URL,
-        mcp_command: None,
-        mcp_hooks: false,
-        underlying_cli: Some("claude"),
-        cli_install_commands: &["curl -fsSL https://claude.ai/install.sh | bash"],
-        cli_install_commands_windows: &["powershell.exe -NoProfile -ExecutionPolicy Bypass -Command \"irm https://claude.ai/install.ps1 | iex\""],
-        adapter_install_commands: &["npm install -g @agentclientprotocol/claude-agent-acp"],
-        cli_install_instructions_url: "https://code.claude.com/docs/en/getting-started",
-        adapter_install_instructions_url: "https://github.com/agentclientprotocol/claude-agent-acp",
-        cli_install_hint: "Buzz talks to Claude Code through the Claude Code CLI.",
-        adapter_install_hint: "Buzz talks to the Claude Code CLI through an ACP adapter. Install it with: npm install -g @agentclientprotocol/claude-agent-acp.",
-        skill_dir: Some(".claude/skills"),
-        supports_acp_model_switching: false,
-        model_env_var: None,
-        provider_env_var: None,
-        provider_locked: true,
-        default_env: &[],
-        config_file_path: Some("~/.claude/settings.json"),
-        config_file_format: Some("json"),
-        supports_acp_native_config: false,
-        thinking_env_var: None,
-        max_tokens_env_var: None,
-        context_limit_env_var: None,
-        required_normalized_fields: &[],
-        login_hint: Some("Run the Claude CLI to complete authentication."),
-        auth_probe_args: Some(&["claude", "auth", "status"]),
-    },
-    KnownAcpRuntime {
-        id: "codex",
-        label: "Codex",
-        commands: &["codex-acp"],
-        aliases: &[],
-        avatar_url: CODEX_AVATAR_URL,
-        mcp_command: Some("buzz-dev-mcp"),
-        mcp_hooks: false,
-        underlying_cli: Some("codex"),
-        cli_install_commands: &["curl -fsSL https://chatgpt.com/codex/install.sh | sh"],
-        cli_install_commands_windows: &["powershell.exe -NoProfile -ExecutionPolicy Bypass -Command \"irm https://chatgpt.com/codex/install.ps1 | iex\""],
-        adapter_install_commands: &["npm install -g @agentclientprotocol/codex-acp"],
-        cli_install_instructions_url: "https://developers.openai.com/codex/cli/",
-        adapter_install_instructions_url: "https://github.com/agentclientprotocol/codex-acp",
-        cli_install_hint: "Buzz talks to Codex through the Codex CLI.",
-        adapter_install_hint: "Buzz talks to the Codex CLI through an ACP adapter. Install it with: npm install -g @agentclientprotocol/codex-acp.",
-        skill_dir: Some(".codex/skills"),
-        supports_acp_model_switching: false,
-        model_env_var: None,
-        provider_env_var: None,
-        provider_locked: false,
-        default_env: &[],
-        config_file_path: Some("~/.codex/config.toml"),
-        config_file_format: Some("toml"),
-        supports_acp_native_config: false,
-        thinking_env_var: None,
-        max_tokens_env_var: None,
-        context_limit_env_var: None,
-        required_normalized_fields: &[],
-        login_hint: Some("Run `codex login` to authenticate."),
-        // Verified: `codex login status` exits 0 when logged in, non-zero otherwise.
-        auth_probe_args: Some(&["codex", "login", "status"]),
-    },
-    KnownAcpRuntime {
-        id: "buzz-agent",
-        label: "Buzz Agent",
-        commands: &["buzz-agent"],
-        aliases: &[],
-        avatar_url: BUZZ_AGENT_AVATAR_URL,
-        mcp_command: Some("buzz-dev-mcp"),
-        mcp_hooks: true,
-        underlying_cli: None,
-        cli_install_commands: &[],
-        cli_install_commands_windows: &[],
-        adapter_install_commands: &[],
-        cli_install_instructions_url: "https://github.com/block/buzz",
-        adapter_install_instructions_url: "https://github.com/block/buzz",
-        cli_install_hint: "Ships with the Buzz desktop app.",
-        adapter_install_hint: "",
-        skill_dir: None,
-        supports_acp_model_switching: true,
-        model_env_var: Some("BUZZ_AGENT_MODEL"),
-        provider_env_var: Some("BUZZ_AGENT_PROVIDER"),
-        provider_locked: false,
-        default_env: &[],
-        config_file_path: None,
-        config_file_format: None,
-        supports_acp_native_config: false,
-        thinking_env_var: Some("BUZZ_AGENT_THINKING_EFFORT"),
-        max_tokens_env_var: Some("BUZZ_AGENT_MAX_OUTPUT_TOKENS"),
-        context_limit_env_var: Some("BUZZ_AGENT_MAX_CONTEXT_TOKENS"),
-        required_normalized_fields: &["model", "provider"],
-        login_hint: None,
-        auth_probe_args: None,
-    },
-    KnownAcpRuntime {
-        id: "omp",
-        label: "Oh My Pi",
-        commands: &["omp"],
-        aliases: &["oh-my-pi"],
-        avatar_url: OMP_AVATAR_URL,
-        mcp_command: None,
-        mcp_hooks: false,
-        // `omp` is the CLI itself; the ACP server is the built-in `omp acp`
-        // subcommand, so there is no separate underlying CLI or npm adapter.
-        underlying_cli: None,
-        cli_install_commands: &["curl -fsSL https://omp.sh/install | sh"],
-        cli_install_commands_windows: &["powershell.exe -NoProfile -ExecutionPolicy Bypass -Command \"irm https://omp.sh/install.ps1 | iex\""],
-        adapter_install_commands: &[],
-        cli_install_instructions_url: "https://github.com/can1357/oh-my-pi",
-        adapter_install_instructions_url: "https://github.com/can1357/oh-my-pi",
-        cli_install_hint: "Install the omp CLI via the official install script.",
-        adapter_install_hint: "",
-        skill_dir: Some(".omp/skills"),
-        supports_acp_model_switching: false,
-        // Model/provider/effort are ACP-native: omp exposes them as
-        // session/new configOptions (categories model/mode/thought_level),
-        // not as environment variables.
-        model_env_var: None,
-        provider_env_var: None,
-        provider_locked: false,
-        default_env: &[],
-        config_file_path: Some("~/.omp/agent/config.yml"),
-        config_file_format: Some("yaml"),
-        supports_acp_native_config: false,
-        thinking_env_var: None,
-        max_tokens_env_var: None,
-        context_limit_env_var: None,
-        required_normalized_fields: &[],
-        // Provider auth is per-model env keys or the omp auth broker; there is
-        // no single login-status probe.
-        login_hint: None,
-        auth_probe_args: None,
-    },
-];
 
 /// Skill discovery directories declared by known runtimes.
 pub(crate) fn known_skill_dirs() -> impl Iterator<Item = &'static str> {
@@ -1445,6 +1275,8 @@ fn discover_acp_runtime_phase1(runtime: &'static KnownAcpRuntime) -> PartialEntr
             source: HarnessSource::Builtin,
             // Builtin entries have no user-editable env; definition_env is empty.
             definition_env: Default::default(),
+            capability_support: runtime.capability_support(),
+            provider_selection: runtime.provider_selection,
         },
     }
 }
@@ -1557,6 +1389,10 @@ fn preset_catalog_entry(
         source: HarnessSource::Preset,
         // Preset entries have static, non-editable env; definition_env is empty.
         definition_env: Default::default(),
+        // v1: presets are harness-managed — no verified capability transport.
+        capability_support: crate::managed_agents::types::RuntimeCapabilitySupport::harness_managed(
+        ),
+        provider_selection: false,
     }
 }
 
@@ -1824,6 +1660,11 @@ pub fn discover_acp_runtimes_from(
                 // Carry definition env into the catalog so the edit form can
                 // read it back — prevents silently erasing env on save.
                 definition_env: def.env.clone(),
+                // v1: custom harnesses are harness-managed — raw args are the
+                // only capability mechanism (plan C.4).
+                capability_support:
+                    crate::managed_agents::types::RuntimeCapabilitySupport::harness_managed(),
+                provider_selection: false,
             });
         }
     }
@@ -1878,5 +1719,7 @@ pub fn managed_agent_avatar_url(command: &str) -> Option<String> {
     Some(runtime.avatar_url.to_string())
 }
 
+#[cfg(test)]
+mod nvm_tests;
 #[cfg(test)]
 mod tests;

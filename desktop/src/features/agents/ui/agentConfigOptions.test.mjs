@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  definitionSaveBlockedForUnresolvedRuntime,
   getDefaultPersonaRuntime,
   getPersonaModelOptions,
   getPersonaProviderOptions,
@@ -135,15 +136,56 @@ test("getDefaultPersonaRuntime returns null when no runtime is available", () =>
 });
 
 // ── runtimeSupportsLlmProviderSelection — provider gating ────────────────────
+//
+// The function reads the Rust catalog projection (`providerSelection` on the
+// catalog entry) — the frontend keeps no rival table (AGENTS.md one rule).
 
-test("runtimeSupportsLlmProviderSelection is true for buzz-agent and goose", () => {
-  assert.equal(runtimeSupportsLlmProviderSelection("buzz-agent"), true);
-  assert.equal(runtimeSupportsLlmProviderSelection("goose"), true);
+const CAPABLE = { providerSelection: true };
+const LOCKED = { providerSelection: false };
+
+test("runtimeSupportsLlmProviderSelection reads the catalog projection", () => {
+  assert.equal(runtimeSupportsLlmProviderSelection(CAPABLE), true);
+  assert.equal(runtimeSupportsLlmProviderSelection(LOCKED), false);
+  // A catalog miss (entry not found / not yet loaded) fails closed.
+  assert.equal(runtimeSupportsLlmProviderSelection(undefined), false);
 });
 
-test("runtimeSupportsLlmProviderSelection is false for codex and claude", () => {
-  assert.equal(runtimeSupportsLlmProviderSelection("codex"), false);
-  assert.equal(runtimeSupportsLlmProviderSelection("claude"), false);
+// ── general-003 (P0): catalog-unresolved ⇒ definition Save blocked ─────────
+//
+// `runtimeSupportsLlmProviderSelection(undefined)` fails closed to false —
+// correct for a genuinely harness-managed runtime, WRONG while the catalog
+// is merely unresolved (loading/errored): the submit payload then clears the
+// stored provider (`update_persona` assigns it verbatim) and republishes the
+// clear to every synced device. The definition dialog therefore treats a
+// nonblank runtime without a resolved catalog entry as UNKNOWN and blocks
+// Save entirely, instead of letting the fail-closed false through.
+
+test("definitionSaveBlockedForUnresolvedRuntime blocks only the unresolved window", () => {
+  // Nonblank runtime + unresolved entry (loading, error, deleted harness) →
+  // blocked: a name-only edit cannot silently wipe provider/model.
+  assert.equal(
+    definitionSaveBlockedForUnresolvedRuntime("goose", undefined),
+    true,
+  );
+  assert.equal(definitionSaveBlockedForUnresolvedRuntime("goose", null), true);
+  // Resolved entries save normally — including genuinely harness-managed
+  // (providerSelection false) runtimes, whose fail-closed behavior is kept.
+  assert.equal(
+    definitionSaveBlockedForUnresolvedRuntime("goose", CAPABLE),
+    false,
+  );
+  assert.equal(
+    definitionSaveBlockedForUnresolvedRuntime("claude", LOCKED),
+    false,
+  );
+  // Blank runtime ("No preference" / builtin definitions) never blocks —
+  // the app default applies and provider edits flow through
+  // modelProviderEditableWithoutRuntime instead.
+  assert.equal(definitionSaveBlockedForUnresolvedRuntime("", undefined), false);
+  assert.equal(
+    definitionSaveBlockedForUnresolvedRuntime("   ", undefined),
+    false,
+  );
 });
 
 test("resetConfigForHarnessChange clears harness-specific values", () => {
@@ -154,7 +196,7 @@ test("resetConfigForHarnessChange clears harness-specific values", () => {
     provider: "anthropic",
   };
 
-  assert.deepEqual(resetConfigForHarnessChange(config, "claude"), {
+  assert.deepEqual(resetConfigForHarnessChange(config, "claude", false), {
     env_vars: { KEEP_ME: "yes" },
     model: null,
     preferred_runtime: "claude",
@@ -170,7 +212,7 @@ test("resetConfigForHarnessChange preserves compatible provider selection", () =
     provider: "anthropic",
   };
 
-  assert.deepEqual(resetConfigForHarnessChange(config, "goose"), {
+  assert.deepEqual(resetConfigForHarnessChange(config, "goose", true), {
     env_vars: { KEEP_ME: "yes" },
     model: null,
     preferred_runtime: "goose",
@@ -186,19 +228,22 @@ test("resetConfigForHarnessChange does not carry relay mesh to Goose", () => {
     provider: "relay-mesh",
   };
 
-  assert.equal(resetConfigForHarnessChange(config, "goose").provider, null);
+  assert.equal(
+    resetConfigForHarnessChange(config, "goose", true).provider,
+    null,
+  );
 });
 
 // ── getPersonaModelOptions — codex/claude do not use global provider ──────────
 //
 // The discovery call in AgentDefinitionDialog passes
-// `runtimeSupportsLlmProviderSelection(runtime) ? effectiveProvider : ""`
+// `runtimeSupportsLlmProviderSelection(entry) ? effectiveProvider : ""`
 // so codex/claude never receive the global provider. These tests verify that
 // the static model options also stay provider-agnostic for those runtimes.
 
 test("getPersonaModelOptions for codex returns only default model regardless of provider", () => {
-  const withProvider = getPersonaModelOptions("codex", "anthropic");
-  const withoutProvider = getPersonaModelOptions("codex", "");
+  const withProvider = getPersonaModelOptions("codex", "anthropic", false);
+  const withoutProvider = getPersonaModelOptions("codex", "", false);
   assert.deepEqual(withProvider, withoutProvider);
   assert.equal(withProvider.length, 1);
   assert.equal(withProvider[0]?.id, "");
@@ -206,7 +251,7 @@ test("getPersonaModelOptions for codex returns only default model regardless of 
 
 test("getPersonaModelOptions for buzz-agent with anthropic filters out zero-value default", () => {
   // anthropic requires explicit model — zero-value option is filtered out
-  const options = getPersonaModelOptions("buzz-agent", "anthropic");
+  const options = getPersonaModelOptions("buzz-agent", "anthropic", true);
   const zeroValue = options.find((o) => o.id === "");
   assert.equal(
     zeroValue,
@@ -216,7 +261,7 @@ test("getPersonaModelOptions for buzz-agent with anthropic filters out zero-valu
 });
 
 test("getPersonaModelOptions for buzz-agent with no provider returns default model", () => {
-  const options = getPersonaModelOptions("buzz-agent", "");
+  const options = getPersonaModelOptions("buzz-agent", "", true);
   assert.equal(options.length, 1);
   assert.equal(options[0]?.id, "");
 });

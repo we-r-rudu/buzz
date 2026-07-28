@@ -37,6 +37,12 @@ import type {
   GitBashPrerequisite,
   RuntimeConfigSurface,
 } from "@/shared/api/types";
+import type {
+  AgentCapabilityPolicy,
+  CapabilitySupportLevel,
+  ToolCapabilityId,
+} from "@/shared/api/capabilityPolicy";
+import { HARNESS_MANAGED_CAPABILITY_SUPPORT } from "@/shared/api/capabilityPolicy";
 
 export * from "@/shared/api/tauriChannels";
 
@@ -158,6 +164,8 @@ export type RawManagedAgent = {
   // `"owner-only"` / `[]` in `fromRawManagedAgent`.
   respond_to?: ManagedAgent["respondTo"];
   respond_to_allowlist?: string[];
+  /** Absent when inheriting (None) or on pre-feature fixtures. */
+  capability_policy_override?: AgentCapabilityPolicy | null;
 };
 
 type RawCreateManagedAgentResponse = {
@@ -200,6 +208,19 @@ export type RawAcpRuntimeCatalogEntry = {
    * Omitted/absent for builtin and preset — skipped in Rust serialization when empty.
    */
   definition_env?: Record<string, string>;
+  /** Optional only for older E2E fixtures; the Rust catalog always supplies it. */
+  capability_support?: RawRuntimeCapabilitySupport;
+  /** Optional only for older E2E fixtures; the Rust catalog always supplies it. */
+  provider_selection?: boolean;
+};
+
+/** Wire shape of `RuntimeCapabilitySupport` (snake_case from Rust). */
+type RawRuntimeCapabilitySupport = {
+  tool_policy: CapabilitySupportLevel;
+  supported_tool_ids: ToolCapabilityId[];
+  unsupported_tool_ids: ToolCapabilityId[];
+  skills_disable: boolean;
+  ambient_skill_note?: string | null;
 };
 
 export type RawInstallStepResult = {
@@ -739,6 +760,7 @@ export function fromRawManagedAgent(agent: RawManagedAgent): ManagedAgent {
     // Real agent records always include them (defaulted server-side).
     respondTo: agent.respond_to ?? "owner-only",
     respondToAllowlist: agent.respond_to_allowlist ?? [],
+    capabilityPolicyOverride: agent.capability_policy_override ?? null,
   };
 }
 
@@ -769,6 +791,23 @@ export function fromRawAcpRuntimeCatalogEntry(
     // Map definition_env (snake_case from Rust) to definitionEnv (camelCase).
     // Absent when empty (Rust serialization skips empty BTreeMap) — default to {}.
     definitionEnv: entry.definition_env ?? {},
+    // Optional only in pre-feature fixtures; the Rust catalog always supplies
+    // both. Default = harness-managed / no provider picker (fail closed).
+    capabilitySupport: fromRawCapabilitySupport(entry.capability_support),
+    providerSelection: entry.provider_selection ?? false,
+  };
+}
+
+function fromRawCapabilitySupport(
+  raw: RawRuntimeCapabilitySupport | undefined,
+): AcpRuntimeCatalogEntry["capabilitySupport"] {
+  if (!raw) return HARNESS_MANAGED_CAPABILITY_SUPPORT;
+  return {
+    toolPolicy: raw.tool_policy,
+    supportedToolIds: raw.supported_tool_ids,
+    unsupportedToolIds: raw.unsupported_tool_ids,
+    skillsDisable: raw.skills_disable,
+    ambientSkillNote: raw.ambient_skill_note ?? null,
   };
 }
 
@@ -894,6 +933,7 @@ export async function createManagedAgent(input: CreateManagedAgentInput) {
         respondTo: input.respondTo,
         respondToAllowlist: input.respondToAllowlist,
         relayMesh: input.relayMesh,
+        capabilityPolicy: input.capabilityPolicy,
       },
     },
   );

@@ -188,6 +188,10 @@ fn run_buzz_acp_auth_command_with_paths<const N: usize>(
         .env("BUZZ_ACP_AGENT_ARGS", agent_args.join(","))
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    // Lossless JSON args transport — see spawn_agent_child's mixed-version note.
+    if let Ok(json) = serde_json::to_string(&agent_args) {
+        command.env("BUZZ_ACP_AGENT_ARGS_JSON", json);
+    }
     if let Some(workdir) = default_agent_workdir() {
         command.current_dir(workdir);
     }

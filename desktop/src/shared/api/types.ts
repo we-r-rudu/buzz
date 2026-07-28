@@ -1,3 +1,12 @@
+import type {
+  AgentCapabilityPolicy,
+  RuntimeCapabilitySupport,
+} from "@/shared/api/capabilityPolicy";
+
+// Re-export the capability-policy types so existing `@/shared/api/types`
+// import sites pick them up without a path change.
+export * from "@/shared/api/capabilityPolicy";
+
 export type ChannelType = "stream" | "forum" | "dm";
 export type ChannelVisibility = "open" | "private";
 export type ChannelRole = "owner" | "admin" | "member" | "guest" | "bot";
@@ -398,6 +407,13 @@ export type ManagedAgent = {
    * `"allowlist"`. Preserved across mode toggles.
    */
   respondToAllowlist: string[];
+  /**
+   * Instance capability-policy override. `null` = inherit the linked
+   * definition's policy (or harness defaults when definition-less); a value
+   * replaces the whole group. Mirrors
+   * `ManagedAgentRecord.capability_policy_override`.
+   */
+  capabilityPolicyOverride: AgentCapabilityPolicy | null;
 };
 
 /**
@@ -461,6 +477,11 @@ export type CreateManagedAgentInput = {
    */
   respondToAllowlist?: string[];
   relayMesh?: RelayMeshConfig;
+  /**
+   * Capability-policy group for the new instance (validated server-side).
+   * Absent = no override (inherit the definition / harness defaults).
+   */
+  capabilityPolicy?: AgentCapabilityPolicy;
 };
 
 export type CreateManagedAgentResponse = {
@@ -562,6 +583,17 @@ export type AcpRuntimeCatalogEntry = {
    * for `builtin` and `preset` entries.
    */
   definitionEnv?: Record<string, string>;
+  /**
+   * Capability-policy facts projected from the Rust runtime catalog — the
+   * ONLY source the UI reads (features/agents/AGENTS.md one rule).
+   */
+  capabilitySupport: RuntimeCapabilitySupport;
+  /**
+   * Whether the runtime takes a user-selected LLM provider (drives the
+   * provider picker). Projected from `KnownAcpRuntime::provider_selection`;
+   * always `false` for preset/custom entries.
+   */
+  providerSelection: boolean;
 };
 
 /** An AcpRuntimeCatalogEntry that is confirmed available — command and binaryPath are non-null. */
@@ -632,82 +664,20 @@ export type AgentModelInfo = {
 };
 
 // ── Config bridge types ──────────────────────────────────────────────────────
-
-export type ConfigOrigin =
-  | "buzzExplicit"
-  | "acpNativeRead"
-  | "acpConfigOption"
-  | "envVar"
-  | "configFile"
-  | "personaDefault"
-  | "globalDefault"
-  | "runtimeOverride"
-  | "harnessConstraint";
-
-export type ConfigWriteMechanism =
-  | { type: "respawnWithEnvVar"; envKey: string }
-  | { type: "acpSetConfigOption"; configId: string }
-  | { type: "acpSetSessionModel" }
-  | { type: "gooseNativeConfigWrite"; configKey: string }
-  | { type: "readOnly" };
-
-export type NormalizedField = {
-  value: string | null;
-  origin: ConfigOrigin;
-  writeVia: ConfigWriteMechanism;
-  overriddenValue: string | null;
-  overriddenOrigin: ConfigOrigin | null;
-  /** True if this field must be set for the harness to function. */
-  isRequired: boolean;
-};
-
-export type ConfigFieldType =
-  | { type: "string" }
-  | { type: "number" }
-  | { type: "boolean" }
-  | { type: "enum"; options: string[] };
-
-export type ConfigField = {
-  key: string;
-  label: string;
-  value: string | null;
-  origin: ConfigOrigin;
-  schemaType: ConfigFieldType;
-  writeVia: ConfigWriteMechanism;
-};
-
-export type ConfigTierStatus = "available" | "pending" | "notApplicable";
-
-export type ConfigSourceReport = {
-  acpNative: ConfigTierStatus;
-  acpConfigOptions: ConfigTierStatus;
-  envVars: ConfigTierStatus;
-  configFile: ConfigTierStatus;
-  configFilePath: string | null;
-  mcpConfigFilePath: string | null;
-};
-
-export type ExtensionEntry = { name: string; kind: string; enabled: boolean };
-
-export type NormalizedConfig = {
-  model: NormalizedField | null;
-  provider: NormalizedField | null;
-  mode: NormalizedField | null;
-  thinkingEffort: NormalizedField | null;
-  maxOutputTokens: NormalizedField | null;
-  contextLimit: NormalizedField | null;
-  systemPrompt: NormalizedField | null;
-};
-
-export type RuntimeConfigSurface = {
-  runtimeId: string | null;
-  runtimeLabel: string | null;
-  isPreSpawn: boolean;
-  normalized: NormalizedConfig;
-  advanced: ConfigField[];
-  extensions: ExtensionEntry[];
-  sources: ConfigSourceReport;
-};
+// Split to `configBridgeTypes.ts` (file-size guard); re-exported so existing
+// import sites are unchanged.
+export type {
+  ConfigField,
+  ConfigFieldType,
+  ConfigOrigin,
+  ConfigSourceReport,
+  ConfigTierStatus,
+  ConfigWriteMechanism,
+  ExtensionEntry,
+  NormalizedConfig,
+  NormalizedField,
+  RuntimeConfigSurface,
+} from "@/shared/api/configBridgeTypes";
 
 export type UpdateManagedAgentInput = {
   pubkey: string;
@@ -738,6 +708,12 @@ export type UpdateManagedAgentInput = {
    * (validated & normalized server-side).
    */
   respondToAllowlist?: string[];
+  /**
+   * Tri-state capability-policy override: absent = don't touch, `null` =
+   * clear to inherit the definition (or harness defaults), value = validate
+   * server-side and set as one group. Mirrors the `provider` precedent.
+   */
+  capabilityPolicyOverride?: AgentCapabilityPolicy | null;
 };
 export type AgentPersona = {
   id: string;
@@ -762,6 +738,11 @@ export type AgentPersona = {
   respondTo: RespondToMode | null;
   respondToAllowlist: string[];
   parallelism: number | null;
+  /**
+   * Definition capability policy (wire shape). `null` = harness defaults
+   * (absent in the store; instances inherit defaults).
+   */
+  capabilityPolicy: AgentCapabilityPolicy | null;
   createdAt: string;
   updatedAt: string;
 };
@@ -787,6 +768,12 @@ export type CreatePersonaInput = {
   namePool?: string[];
   envVars?: Record<string, string>;
   behavior?: PersonaBehaviorInput;
+  /**
+   * Capability-policy group, same absent-vs-present contract as `behavior`:
+   * absent = don't touch, present = validate server-side and replace as one
+   * group.
+   */
+  capabilityPolicy?: AgentCapabilityPolicy;
 };
 
 export type UpdatePersonaInput = {
@@ -800,6 +787,8 @@ export type UpdatePersonaInput = {
   namePool?: string[];
   envVars?: Record<string, string>;
   behavior?: PersonaBehaviorInput;
+  /** See `CreatePersonaInput.capabilityPolicy` — same group contract. */
+  capabilityPolicy?: AgentCapabilityPolicy;
 };
 
 // ── Team types ────────────────────────────────────────────────────────────────

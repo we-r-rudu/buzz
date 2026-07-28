@@ -824,6 +824,7 @@ pub fn run() {
             discover_backend_providers,
             probe_backend_provider,
             list_personas,
+            list_buzz_prompt_skills,
             create_persona,
             update_persona,
             delete_persona,

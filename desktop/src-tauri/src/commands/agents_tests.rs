@@ -55,6 +55,8 @@ fn bare_agent_record(
         is_active: true,
         source_team: None,
         source_team_persona_slug: None,
+        definition_capability_policy: Default::default(),
+        capability_policy_override: None,
         relay_mesh: None,
         auto_restart_on_config_change: false,
         definition_respond_to: None,
@@ -81,6 +83,7 @@ fn persona_record(id: &str, model: Option<&str>, provider: Option<&str>) -> Agen
         respond_to: None,
         respond_to_allowlist: vec![],
         parallelism: None,
+        capability_policy: Default::default(),
         created_at: "".to_string(),
         updated_at: "".to_string(),
     }
@@ -425,6 +428,12 @@ fn deploy_payload_carries_the_full_behavioral_quad() {
     ))
     .expect("sample record");
 
+    let descriptor = crate::managed_agents::readiness::EffectiveHarnessDescriptor {
+        command: "goose".to_string(),
+        args: vec!["acp".to_string()],
+        base_args: vec![],
+        env: std::collections::BTreeMap::new(),
+    };
     let payload = deploy_payload_json(
         &record,
         "wss://relay.example".to_string(),
@@ -432,6 +441,7 @@ fn deploy_payload_carries_the_full_behavioral_quad() {
         Some("openai".to_string()),
         None,
         std::collections::BTreeMap::new(),
+        &descriptor,
     );
 
     assert_eq!(payload["parallelism"], 4);
@@ -440,4 +450,143 @@ fn deploy_payload_carries_the_full_behavioral_quad() {
     assert_eq!(payload["model"], "gpt-x");
     assert_eq!(payload["provider"], "openai");
     assert_eq!(payload["relay_url"], "wss://relay.example");
+    // The provider contract keys are unchanged; command/args travel as a
+    // lossless JSON array (HC-006).
+    assert_eq!(payload["agent_command"], "goose");
+    assert_eq!(payload["agent_args"][0], "acp");
+}
+
+/// Descriptor-equality gate (§7): the provider payload's command/args MUST be
+/// exactly what the local descriptor resolves after persona/runtime/policy
+/// edits — local spawn and provider deploy can never diverge (HC-006).
+#[test]
+fn deploy_payload_matches_local_descriptor_after_policy_edit() {
+    use crate::managed_agents::{
+        resolve_effective_harness_descriptor, AgentCapabilityPolicy, SkillPolicy, ToolCapabilityId,
+        ToolPolicy,
+    };
+
+    let mut record = bare_agent_record(Some("p1"), None, None);
+    record.runtime = Some("omp".to_string());
+    // v1 ships no verified transport (HC-001): the honor-able policy shape is
+    // skills-only, delivered via the composed prompt — args stay untouched.
+    record.capability_policy_override = Some(AgentCapabilityPolicy {
+        tools: ToolPolicy::HarnessDefault,
+        skills: SkillPolicy::Selected {
+            selected: vec!["buzz-cli".to_string()],
+        },
+    });
+    let personas = vec![persona_record("p1", None, None)];
+    let global = crate::managed_agents::GlobalAgentConfig::default();
+
+    let descriptor = resolve_effective_harness_descriptor(&record, &personas, &global).unwrap();
+    let payload = deploy_payload_json(
+        &record,
+        "wss://relay.example".to_string(),
+        None,
+        None,
+        None,
+        std::collections::BTreeMap::new(),
+        &descriptor,
+    );
+
+    assert_eq!(
+        payload["agent_command"].as_str().unwrap(),
+        descriptor.command
+    );
+    let payload_args: Vec<String> = serde_json::from_value(payload["agent_args"].clone()).unwrap();
+    assert_eq!(payload_args, descriptor.args);
+    assert_eq!(payload_args, vec!["acp".to_string()]);
+
+    // An explicit tool policy on any v1 runtime (omp included, post-HC-001)
+    // refuses the descriptor — deploy fails visibly, never a silent fallback.
+    record.capability_policy_override = Some(AgentCapabilityPolicy {
+        tools: ToolPolicy::Selected {
+            selected: vec![ToolCapabilityId::FilesRead],
+        },
+        skills: SkillPolicy::Inherit,
+    });
+    assert!(resolve_effective_harness_descriptor(&record, &personas, &global).is_err());
+}
+
+/// A runtime switch re-resolves the payload command/args through the
+/// descriptor — the record's create-time snapshot bytes are not authoritative.
+#[test]
+fn deploy_payload_follows_runtime_switch_not_record_snapshot() {
+    use crate::managed_agents::resolve_effective_harness_descriptor;
+
+    let mut record = bare_agent_record(Some("p1"), None, None);
+    // Create-time snapshot says goose; the live runtime pin says omp.
+    record.agent_command = "goose".to_string();
+    record.runtime = Some("omp".to_string());
+    let personas = vec![persona_record("p1", None, None)];
+    let global = crate::managed_agents::GlobalAgentConfig::default();
+
+    let descriptor = resolve_effective_harness_descriptor(&record, &personas, &global).unwrap();
+    assert_eq!(descriptor.command, "omp");
+    assert_eq!(descriptor.args, vec!["acp".to_string()]);
+}
+
+// ── round2-general-003: the §7 provider release gate reads the EFFECTIVE ──
+// policy — a definition-level policy added after creation must not ride
+// redeploy-on-edit inheritance to the VPS, and an instance override must
+// not either. All three deploy call sites (create, redeploy, provider
+// start) funnel through `build_deploy_payload`, which consults this gate.
+
+#[test]
+fn provider_gate_refuses_non_default_effective_policy() {
+    use crate::managed_agents::{AgentCapabilityPolicy, SkillPolicy, ToolCapabilityId, ToolPolicy};
+
+    let global = crate::managed_agents::GlobalAgentConfig::default();
+    let skills_policy = AgentCapabilityPolicy {
+        tools: ToolPolicy::HarnessDefault,
+        skills: SkillPolicy::Selected {
+            selected: vec!["buzz-cli".to_string()],
+        },
+    };
+
+    // (1) Definition-INHERITED: the record carries no override; the linked
+    // definition gains a policy after creation — the reachable bypass.
+    let record = bare_agent_record(Some("p1"), None, None);
+    let mut definition = persona_record("p1", None, None);
+    definition.capability_policy = skills_policy.clone();
+    let resolved = crate::managed_agents::effective_config::resolve_effective_capability_policy(
+        &record,
+        &[definition],
+        &global,
+    );
+    let error = super::provider_capability_gate_error(&resolved.policy)
+        .expect("an inherited non-default policy must trip the gate");
+    assert!(
+        error.contains(super::PROVIDER_CAPABILITY_GATE_MESSAGE),
+        "{error}"
+    );
+
+    // (2) Instance-OVERRIDE: the override wins over a default definition.
+    let mut record = bare_agent_record(Some("p1"), None, None);
+    record.capability_policy_override = Some(AgentCapabilityPolicy {
+        tools: ToolPolicy::Selected {
+            selected: vec![ToolCapabilityId::FilesRead],
+        },
+        skills: SkillPolicy::Inherit,
+    });
+    let resolved = crate::managed_agents::effective_config::resolve_effective_capability_policy(
+        &record,
+        &[persona_record("p1", None, None)],
+        &global,
+    );
+    assert!(super::provider_capability_gate_error(&resolved.policy).is_some());
+
+    // (3) Default-policy records pass — existing provider agents unaffected.
+    let record = bare_agent_record(Some("p1"), None, None);
+    let resolved = crate::managed_agents::effective_config::resolve_effective_capability_policy(
+        &record,
+        &[persona_record("p1", None, None)],
+        &global,
+    );
+    assert!(super::provider_capability_gate_error(&resolved.policy).is_none());
+
+    // The gate stays ALL-POLICY: a tools-free skills policy trips it too
+    // (narrowing to tools-only would silently declare skills provider-safe).
+    assert!(super::provider_capability_gate_error(&skills_policy).is_some());
 }

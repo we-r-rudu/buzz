@@ -8,7 +8,10 @@ import {
   AgentConfigFields,
   EMPTY_GLOBAL_CONFIG,
 } from "@/features/agents/ui/AgentConfigFields";
-import { resetConfigForHarnessChange } from "@/features/agents/ui/agentConfigOptions";
+import {
+  resetConfigForHarnessChange,
+  runtimeSupportsLlmProviderSelection,
+} from "@/features/agents/ui/agentConfigOptions";
 import { AgentDropdownSelect } from "@/features/agents/ui/agentConfigControls";
 import { createSaveCoalescer } from "./saveCoalescer";
 import { getBakedBuildEnv, type BakedEnvEntry } from "@/shared/api/tauri";
@@ -162,13 +165,19 @@ function AgentDefaultsSection({
 
   const handleHarnessChange = React.useCallback(
     (runtimeId: string) => {
-      const next = resetConfigForHarnessChange(config, runtimeId);
+      const next = resetConfigForHarnessChange(
+        config,
+        runtimeId,
+        runtimeSupportsLlmProviderSelection(
+          readyRuntimes.find((runtime) => runtime.id === runtimeId),
+        ),
+      );
       setIsCustomModelEditing(false);
       setIsCustomProvider(false);
       setConfig(next);
       coalescerRef.current?.enqueue(next);
     },
-    [config],
+    [config, readyRuntimes],
   );
 
   React.useEffect(() => {

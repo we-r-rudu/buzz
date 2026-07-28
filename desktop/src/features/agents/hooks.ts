@@ -59,6 +59,7 @@ import {
   type EncodedSnapshotPayload,
   type SnapshotMemoryLevel,
   type SnapshotFormat,
+  listBuzzPromptSkills,
   listPersonas,
   setPersonaActive,
   updatePersona,
@@ -213,6 +214,17 @@ export function useAcpAuthMethodsQuery(
     queryKey: [...acpAuthMethodsQueryKey, runtimeId],
     queryFn: () => discoverAcpAuthMethods(runtimeId),
     staleTime: 30_000,
+  });
+}
+
+/** Static Buzz prompt-skill catalog for the capability-policy pickers. */
+export function useBuzzPromptSkillsQuery(options?: { enabled?: boolean }) {
+  return useQuery({
+    enabled: options?.enabled ?? true,
+    queryKey: ["buzzPromptSkills"],
+    queryFn: listBuzzPromptSkills,
+    // Static in Rust — one fetch per session is enough.
+    staleTime: Number.POSITIVE_INFINITY,
   });
 }
 

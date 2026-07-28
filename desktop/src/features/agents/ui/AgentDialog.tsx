@@ -120,6 +120,7 @@ function AgentCreateDialogRouter({
 
   return (
     <AgentDefinitionDialog
+      createProviderBacked={runDraft.runOn !== "local"}
       createRunSection={
         <WhereToRunSection
           draft={runDraft}

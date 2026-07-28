@@ -1,5 +1,7 @@
 import { invokeTauri } from "@/shared/api/tauri";
+import type { BuzzPromptSkillInfo } from "@/shared/api/capabilityPolicy";
 import type {
+  AgentCapabilityPolicy,
   AgentPersona,
   CreatePersonaInput,
   RespondToMode,
@@ -22,6 +24,8 @@ export type RawPersona = {
   respond_to?: string | null;
   respond_to_allowlist?: string[];
   parallelism?: number | null;
+  /** Absent = harness defaults (skip-serialized when default server-side). */
+  capability_policy?: AgentCapabilityPolicy;
   created_at: string;
   updated_at: string;
   /** Non-null when the pack `.persona.md` write-back failed (non-fatal). */
@@ -45,6 +49,7 @@ export function fromRawPersona(persona: RawPersona): AgentPersona {
     respondTo: (persona.respond_to as RespondToMode | undefined) ?? null,
     respondToAllowlist: persona.respond_to_allowlist ?? [],
     parallelism: persona.parallelism ?? null,
+    capabilityPolicy: persona.capability_policy ?? null,
     createdAt: persona.created_at,
     updatedAt: persona.updated_at,
   };
@@ -52,6 +57,11 @@ export function fromRawPersona(persona: RawPersona): AgentPersona {
 
 export async function listPersonas(): Promise<AgentPersona[]> {
   return (await invokeTauri<RawPersona[]>("list_personas")).map(fromRawPersona);
+}
+
+/** Static Buzz prompt-skill catalog for the capability-policy pickers. */
+export async function listBuzzPromptSkills(): Promise<BuzzPromptSkillInfo[]> {
+  return invokeTauri<BuzzPromptSkillInfo[]>("list_buzz_prompt_skills");
 }
 
 export async function createPersona(
@@ -69,6 +79,7 @@ export async function createPersona(
         namePool: input.namePool ?? [],
         envVars: input.envVars ?? {},
         behavior: input.behavior,
+        capabilityPolicy: input.capabilityPolicy,
       },
     }),
   );
@@ -93,6 +104,8 @@ export async function updatePersona(
       envVars: input.envVars,
       // Same absent-vs-present contract as envVars for the behavioral quad.
       behavior: input.behavior,
+      // Same group contract for the capability policy.
+      capabilityPolicy: input.capabilityPolicy,
     },
   });
   if (raw.writeback_warning) {
