@@ -73,9 +73,12 @@ jobs:
           $PB -c "Set :CFBundleName $PRODUCT_NAME" "$PLIST"
           $PB -c "Set :CFBundleDisplayName $PRODUCT_NAME" "$PLIST"
           for key in NSMicrophoneUsageDescription NSCameraUsageDescription NSLocalNetworkUsageDescription; do
-            cur=$($PB -c "Print :$key" "$PLIST")
-            new=$(sed "s/^[^ ]* /$PRODUCT_NAME /" <<<"$cur")
-            $PB -c "Set :$key $new" "$PLIST"
+            if cur=$($PB -c "Print :$key" "$PLIST" 2>/dev/null); then
+              new=$(sed "s/^[^ ]* /$PRODUCT_NAME /" <<<"$cur")
+              $PB -c "Set :$key $new" "$PLIST"
+            else
+              $PB -c "Add :$key string $PRODUCT_NAME needs local network access for calls." "$PLIST"
+            fi
           done
           # Release arm of keyring_service() only — the bare 8-space-indented
           # literal, never the migration_marker_name comparison.
